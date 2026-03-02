@@ -79,7 +79,7 @@ async def _require_module_entitlement(
 
     token_company_id = str(claims.company_id).strip() if claims.company_id is not None else None
     company_id = header_company_id or token_company_id
-    company_code = header_company_code or claims.company_code
+    company_code = header_company_code if header_company_code is not None else claims.company_code
 
     if not company_id and claims.client_id:
         mapping = await cache.get_company_by_client_id(claims.client_id)
@@ -124,7 +124,7 @@ async def _require_module_entitlement(
             },
         )
 
-    branch_code = header_branch_code or claims.branch_code
+    branch_code = header_branch_code if header_branch_code is not None else claims.branch_code
     try:
         record = await cache.get_entitlement(
             company_id=company_id,

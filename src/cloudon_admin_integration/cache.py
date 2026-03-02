@@ -31,8 +31,17 @@ class IntegrationCache:
         self.cfg = cfg
         self.redis: redis.Redis | None = None
 
-    def _key(self, company_id: str, module_code: str, branch_code: str | None = None) -> str:
-        branch = (branch_code or "__all__").strip() or "__all__"
+    @staticmethod
+    def _norm_code(value: Any, *, default: str | None = None) -> str | None:
+        if value is None:
+            return default
+        text = str(value).strip()
+        if not text:
+            return default
+        return text
+
+    def _key(self, company_id: str, module_code: str, branch_code: str | int | None = None) -> str:
+        branch = self._norm_code(branch_code, default="__all__") or "__all__"
         return f"{self.cfg.redis_key_prefix}:entitlement:{company_id}:{module_code}:{branch}"
 
     @property
@@ -83,12 +92,13 @@ class IntegrationCache:
         return data
 
     async def get_entitlement(
-        self, company_id: str, module_code: str, branch_code: str | None = None
+        self, company_id: str, module_code: str, branch_code: str | int | None = None
     ) -> dict[str, Any] | None:
-        if branch_code:
-            by_branch = await self._get_record_by_key(self._key(company_id, module_code, branch_code))
+        norm_branch = self._norm_code(branch_code)
+        if norm_branch is not None:
+            by_branch = await self._get_record_by_key(self._key(company_id, module_code, norm_branch))
             if by_branch:
-                by_branch["_matched_branch"] = branch_code
+                by_branch["_matched_branch"] = norm_branch
                 return by_branch
         fallback = await self._get_record_by_key(self._key(company_id, module_code, None))
         if fallback:
