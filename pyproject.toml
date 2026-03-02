@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cloudon-admin-integration"
+version = "0.1.0"
+description = "Reusable FastAPI integration layer for CloudOn Admin Panel entitlement and sync flows"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "CloudOn" }]
+dependencies = [
+  "fastapi>=0.95",
+  "httpx>=0.24",
+  "redis>=5.0",
+  "PyJWT>=2.8",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
