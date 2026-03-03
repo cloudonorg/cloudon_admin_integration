@@ -38,6 +38,10 @@ Disable if needed:
 wire_integration(app, include_response_envelope=False)
 ```
 
+Relevant env flags:
+- `REQUIRE_MODULE_PARAMS=true|false` (if true, empty params returns 403)
+- `LICENSE_EXPIRY_WARNING_DAYS=10` (adds success `message` when license is close to expiration)
+
 ## Protect endpoint
 
 ```python

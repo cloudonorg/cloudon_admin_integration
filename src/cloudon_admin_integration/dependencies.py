@@ -7,7 +7,7 @@ from fastapi import Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from cloudon_admin_integration.admin_client import AdminPanelClient
-from cloudon_admin_integration.cache import IntegrationCache, is_license_current
+from cloudon_admin_integration.cache import IntegrationCache, is_license_current, parse_date_or_none
 from cloudon_admin_integration.config import IntegrationSettings, settings
 from cloudon_admin_integration.security import ApiClientClaims, require_valid_api_client_token
 
@@ -46,6 +46,10 @@ class EntitlementContext(BaseModel):
 def _to_int_or_none(value: Any) -> int | None:
     if value is None:
         return None
+
+
+def _fail(status_code: int, reason: str, message: str) -> None:
+    raise HTTPException(status_code=status_code, detail={"reason": reason, "message": message})
     text = str(value).strip()
     if not text:
         return None
@@ -60,9 +64,9 @@ async def require_sync_key(
     cfg: IntegrationSettings = Depends(get_settings),
 ) -> None:
     if not cfg.sync_key:
-        raise HTTPException(status_code=500, detail="SYNC_KEY is not configured")
+        _fail(500, "sync_key_missing", "SYNC_KEY is not configured")
     if x_sync_key != cfg.sync_key:
-        raise HTTPException(status_code=401, detail="Invalid X-Sync-Key")
+        _fail(401, "sync_key_invalid", "Invalid X-Sync-Key")
 
 
 async def _require_module_entitlement(
@@ -93,36 +97,18 @@ async def _require_module_entitlement(
         if len(company_ids) == 1:
             company_id = company_ids[0]
         elif len(company_ids) > 1:
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "reason": "company_ambiguous",
-                    "message": "Multiple companies match company_code. Provide X-Company-Id or token company_id.",
-                    "company_code": company_code,
-                    "company_ids": company_ids,
-                },
+            _fail(
+                403,
+                "company_ambiguous",
+                "Multiple companies match company_code. Provide X-Company-Id or token company_id.",
             )
 
     if not company_id:
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "reason": "company_missing",
-                "message": "Could not resolve company_id from token/client mapping/header",
-            },
-        )
+        _fail(403, "company_missing", "Could not resolve company_id from token/client mapping/header")
 
     token_module = claims.module_code
     if token_module and token_module not in {module_code, "*"}:
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "reason": "token_module_mismatch",
-                "message": "Token is not valid for this module",
-                "token_module_code": token_module,
-                "expected_module_code": module_code,
-            },
-        )
+        _fail(403, "token_module_mismatch", "Token is not valid for this module")
 
     branch_code = header_branch_code if header_branch_code is not None else claims.branch_code
     try:
@@ -132,54 +118,31 @@ async def _require_module_entitlement(
             branch_code=branch_code,
         )
     except RuntimeError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail={"reason": "cache_unavailable", "message": str(exc)},
-        ) from exc
+        _fail(503, "cache_unavailable", str(exc))
     if not record:
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "reason": "license_not_found",
-                "message": "No cached license found for company/module/branch",
-                "company_id": company_id,
-                "company_code": company_code,
-                "module_code": module_code,
-                "branch_code": branch_code,
-            },
-        )
+        _fail(403, "license_not_found", "No cached license found for company/module/branch")
 
     if not record.get("is_running"):
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "reason": "license_not_running",
-                "message": "License is not running",
-                "company_id": company_id,
-                "company_code": record.get("company_code") or company_code,
-                "module_code": module_code,
-                "branch_code": record.get("branch_code"),
-            },
-        )
+        _fail(403, "license_not_running", "License is not running")
 
     if not is_license_current(
         record.get("license_to_date"),
         bool(record.get("is_running")),
         cfg.license_extension_days,
     ):
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "reason": "license_expired",
-                "message": "License has expired",
-                "company_id": company_id,
-                "company_code": record.get("company_code") or company_code,
-                "module_code": module_code,
-                "branch_code": record.get("branch_code"),
-                "license_to_date": record.get("license_to_date"),
-                "license_extension_days": cfg.license_extension_days,
-            },
-        )
+        _fail(403, "license_expired", "License has expired")
+
+    if cfg.require_module_params and not (record.get("params") or {}):
+        _fail(403, "params_not_found", "Params not found for this module")
+
+    warning_message = None
+    license_date = parse_date_or_none(record.get("license_to_date"))
+    if license_date:
+        days_left = (license_date - datetime.utcnow().date()).days
+        if 0 <= days_left <= cfg.license_expiry_warning_days:
+            warning_message = f"License will expire in {days_left} day(s)"
+    if warning_message:
+        request.state.integration_message = warning_message
 
     return EntitlementContext(
         company_id=company_id,

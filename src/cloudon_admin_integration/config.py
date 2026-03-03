@@ -46,6 +46,8 @@ class IntegrationSettings:
     cache_all_modules: bool
     integration_wrap_responses: bool
     integration_excluded_paths: tuple[str, ...]
+    require_module_params: bool
+    license_expiry_warning_days: int
 
     @classmethod
     def from_env(cls) -> "IntegrationSettings":
@@ -99,6 +101,8 @@ class IntegrationSettings:
                 os.getenv("INTEGRATION_EXCLUDED_PATHS"),
                 ("/docs", "/redoc", "/openapi.json", "/favicon.ico"),
             ),
+            require_module_params=_as_bool(os.getenv("REQUIRE_MODULE_PARAMS"), False),
+            license_expiry_warning_days=int(os.getenv("LICENSE_EXPIRY_WARNING_DAYS") or 10),
         )
 
     def admin_url(self, path: str) -> str:

@@ -20,37 +20,53 @@ def response_envelope(*, success: bool, data: Any = None, message: str | None = 
     }
 
 
-def normalize_response_payload(payload: Any, status_code: int) -> dict[str, Any]:
+def _extract_error_and_message(detail: Any, fallback_message: str = "Request failed") -> tuple[Any, str]:
+    if isinstance(detail, dict):
+        reason = detail.get("reason")
+        message = detail.get("message") or fallback_message
+        # Keep external error payload human-friendly.
+        return (message or reason or fallback_message), message
+    if isinstance(detail, str):
+        return detail, detail
+    return fallback_message, fallback_message
+
+
+def normalize_response_payload(payload: Any, status_code: int, *, default_message: str | None = None) -> dict[str, Any]:
     if isinstance(payload, dict):
         if "success" in payload:
             success = bool(payload.get("success"))
             error = payload.get("error")
+            message = payload.get("message")
             if not success and error is None:
                 if "detail" in payload:
-                    error = payload.get("detail")
+                    error, message = _extract_error_and_message(payload.get("detail"))
                 elif "error_code" in payload:
-                    error = {"code": payload.get("error_code")}
+                    error = payload.get("error_code")
+                    message = message or "Request failed"
                 elif payload.get("message"):
                     error = payload.get("message")
+            if success and not message:
+                message = default_message
             return response_envelope(
                 success=success,
                 error=error,
-                message=payload.get("message"),
+                message=message,
                 data=payload.get("data"),
             )
 
         if status_code >= 400:
+            err, msg = _extract_error_and_message(payload.get("detail") or payload)
             return response_envelope(
                 success=False,
-                error=payload.get("detail") or payload,
-                message=payload.get("message"),
+                error=err,
+                message=msg,
                 data=payload.get("data"),
             )
 
     if status_code >= 400:
         return response_envelope(success=False, error=payload, message="Request failed", data=None)
 
-    return response_envelope(success=True, error=None, message=None, data=payload)
+    return response_envelope(success=True, error=None, message=default_message, data=payload)
 
 
 def wire_response_envelope(app: FastAPI, *, excluded_paths: set[str] | None = None) -> None:
@@ -58,10 +74,10 @@ def wire_response_envelope(app: FastAPI, *, excluded_paths: set[str] | None = No
 
     @app.exception_handler(HTTPException)
     async def _http_exception_handler(request: Request, exc: HTTPException):  # noqa: ARG001
-        message = exc.detail if isinstance(exc.detail, str) else "Request failed"
+        error, message = _extract_error_and_message(exc.detail)
         return JSONResponse(
             status_code=exc.status_code,
-            content=response_envelope(success=False, error=exc.detail, message=message, data=None),
+            content=response_envelope(success=False, error=error, message=message, data=[]),
         )
 
     @app.exception_handler(RequestValidationError)
@@ -70,9 +86,9 @@ def wire_response_envelope(app: FastAPI, *, excluded_paths: set[str] | None = No
             status_code=422,
             content=response_envelope(
                 success=False,
-                error=exc.errors(),
+                error="validation_error",
                 message="Validation error",
-                data=None,
+                data=[],
             ),
         )
 
@@ -83,15 +99,16 @@ def wire_response_envelope(app: FastAPI, *, excluded_paths: set[str] | None = No
             status_code=500,
             content=response_envelope(
                 success=False,
-                error={"type": exc.__class__.__name__},
+                error="internal_server_error",
                 message="Internal server error",
-                data=None,
+                data=[],
             ),
         )
 
     @app.middleware("http")
     async def _response_envelope_middleware(request: Request, call_next):
         response = await call_next(request)
+        default_message = getattr(request.state, "integration_message", None)
 
         if request.url.path in excluded:
             return response
@@ -105,7 +122,7 @@ def wire_response_envelope(app: FastAPI, *, excluded_paths: set[str] | None = No
             body_bytes += chunk
 
         if not body_bytes:
-            normalized = normalize_response_payload(None, response.status_code)
+            normalized = normalize_response_payload(None, response.status_code, default_message=default_message)
         else:
             try:
                 payload = json.loads(body_bytes)
@@ -115,10 +132,10 @@ def wire_response_envelope(app: FastAPI, *, excluded_paths: set[str] | None = No
                     content=response_envelope(
                         success=response.status_code < 400,
                         error=None if response.status_code < 400 else "Non-JSON response body",
-                        message=None if response.status_code < 400 else "Request failed",
-                        data=body_bytes.decode("utf-8", errors="replace"),
+                        message=default_message if response.status_code < 400 else "Request failed",
+                        data=body_bytes.decode("utf-8", errors="replace") if response.status_code < 400 else [],
                     ),
                 )
-            normalized = normalize_response_payload(payload, response.status_code)
+            normalized = normalize_response_payload(payload, response.status_code, default_message=default_message)
 
         return JSONResponse(status_code=response.status_code, content=normalized)

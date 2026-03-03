@@ -23,6 +23,10 @@ class ApiClientClaims(BaseModel):
     raw: dict[str, Any] = Field(default_factory=dict)
 
 
+def _fail(status_code: int, reason: str, message: str) -> None:
+    raise HTTPException(status_code=status_code, detail={"reason": reason, "message": message})
+
+
 def _to_int_or_none(value: Any) -> int | None:
     if value is None:
         return None
@@ -39,10 +43,10 @@ async def require_valid_api_client_token(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> ApiClientClaims:
     if credentials is None:
-        raise HTTPException(status_code=401, detail="Missing bearer token")
+        _fail(401, "token_missing", "Missing bearer token")
 
     if credentials.scheme.lower() != "bearer":
-        raise HTTPException(status_code=401, detail="Authorization scheme must be Bearer")
+        _fail(401, "token_scheme_invalid", "Authorization scheme must be Bearer")
 
     token = credentials.credentials
     try:
@@ -54,19 +58,19 @@ async def require_valid_api_client_token(
             options={"verify_aud": bool(settings.admin_panel_jwt_audience)},
         )
     except jwt.ExpiredSignatureError as exc:
-        raise HTTPException(status_code=401, detail="Token expired") from exc
+        _fail(401, "token_expired", "Token expired")
     except jwt.InvalidTokenError as exc:
-        raise HTTPException(status_code=401, detail=f"Invalid token: {exc}") from exc
+        _fail(401, "token_invalid", "Invalid token")
     except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        _fail(500, "token_verification_unavailable", str(exc))
 
     token_type = decoded.get("token_type")
     if token_type != "api_client":
-        raise HTTPException(status_code=401, detail="Invalid token_type")
+        _fail(401, "token_type_invalid", "Invalid token_type")
 
     company_code = _to_int_or_none(decoded.get("company_code"))
     if company_code is None:
-        raise HTTPException(status_code=401, detail="Token missing company_code")
+        _fail(401, "token_company_missing", "Token missing company_code")
 
     token_module_code = (decoded.get("module_code") or "").strip() or None
     if (
@@ -74,15 +78,7 @@ async def require_valid_api_client_token(
         and token_module_code
         and token_module_code not in {settings.app_module_code, "*"}
     ):
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "reason": "token_module_mismatch",
-                "message": "Token module_code does not match this middleware module",
-                "token_module_code": token_module_code,
-                "expected_module_code": settings.app_module_code,
-            },
-        )
+        _fail(403, "token_module_mismatch", "Token module_code does not match this middleware module")
 
     return ApiClientClaims(
         token_type=token_type,
