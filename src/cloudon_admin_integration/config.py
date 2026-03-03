@@ -8,6 +8,13 @@ def _as_bool(value: str | None, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _as_csv(value: str | None, default: tuple[str, ...]) -> tuple[str, ...]:
+    if value is None:
+        return default
+    parts = tuple(item.strip() for item in value.split(",") if item.strip())
+    return parts or default
+
+
 @dataclass(frozen=True)
 class IntegrationSettings:
     app_module_code: str
@@ -37,6 +44,8 @@ class IntegrationSettings:
     enforce_token_module_match: bool
     license_extension_days: int
     cache_all_modules: bool
+    integration_wrap_responses: bool
+    integration_excluded_paths: tuple[str, ...]
 
     @classmethod
     def from_env(cls) -> "IntegrationSettings":
@@ -85,6 +94,11 @@ class IntegrationSettings:
                 (os.getenv("ADMIN_PANEL_LICENSE_EXTENSION_DAYS") or os.getenv("LICENSE_EXTENSION_DAYS") or 0)
             ),
             cache_all_modules=_as_bool(os.getenv("CACHE_ALL_MODULES"), True),
+            integration_wrap_responses=_as_bool(os.getenv("INTEGRATION_WRAP_RESPONSES"), True),
+            integration_excluded_paths=_as_csv(
+                os.getenv("INTEGRATION_EXCLUDED_PATHS"),
+                ("/docs", "/redoc", "/openapi.json", "/favicon.ico"),
+            ),
         )
 
     def admin_url(self, path: str) -> str:

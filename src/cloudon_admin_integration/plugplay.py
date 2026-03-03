@@ -1,11 +1,22 @@
 from fastapi import Depends, FastAPI
 
+from cloudon_admin_integration.config import settings
 from cloudon_admin_integration.dependencies import require_module_entitlement_for
 from cloudon_admin_integration.sync_routes import auth_proxy_router, sync_router
 from cloudon_admin_integration.dependencies import startup_integration, shutdown_integration
+from cloudon_admin_integration.responses import wire_response_envelope
 
 
-def wire_integration(app: FastAPI, *, include_sync_routes: bool = True, include_auth_proxy: bool = True) -> None:
+def wire_integration(
+    app: FastAPI,
+    *,
+    include_sync_routes: bool = True,
+    include_auth_proxy: bool = True,
+    include_response_envelope: bool = True,
+) -> None:
+    if include_response_envelope and settings.integration_wrap_responses:
+        wire_response_envelope(app, excluded_paths=set(settings.integration_excluded_paths))
+
     @app.on_event("startup")
     async def _integration_startup() -> None:
         await startup_integration()

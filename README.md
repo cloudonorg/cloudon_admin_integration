@@ -5,6 +5,7 @@ Reusable FastAPI integration for CloudOn Admin Panel:
 - Redis-cached entitlement checks (company/module/branch)
 - Sync routes for license/params/full rebuild
 - Optional token proxy
+- Global API response envelope and exception normalization
 
 ## Install
 
@@ -18,6 +19,23 @@ pip install "git+https://github.com/cloudonorg/cloudon_admin_integration.git"
 from cloudon_admin_integration import wire_integration
 
 wire_integration(app)
+```
+
+`wire_integration(app)` also wires global response/error formatting by default:
+
+```json
+{
+  "success": true,
+  "error": null,
+  "message": null,
+  "data": {}
+}
+```
+
+Disable if needed:
+
+```python
+wire_integration(app, include_response_envelope=False)
 ```
 
 ## Protect endpoint
