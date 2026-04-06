@@ -9,10 +9,9 @@ from cloudon_admin_integration.dependencies import (
 from cloudon_admin_integration.plugplay import entitlement_dependency, wire_integration
 from cloudon_admin_integration.responses import wire_response_envelope
 from cloudon_admin_integration.security import require_valid_api_client_token
-from cloudon_admin_integration.sync_routes import auth_proxy_router, sync_router
+from cloudon_admin_integration.sync_routes import sync_router
 
 __all__ = [
-    "auth_proxy_router",
     "get_cache",
     "get_settings",
     "entitlement_dependency",

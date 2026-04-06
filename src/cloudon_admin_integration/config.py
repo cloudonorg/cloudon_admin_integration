@@ -19,18 +19,11 @@ def _as_csv(value: str | None, default: tuple[str, ...]) -> tuple[str, ...]:
 class IntegrationSettings:
     app_module_code: str
     admin_panel_base_url: str
-    admin_panel_client_token_path: str
-    admin_panel_authorization_path: str
-    admin_panel_running_licenses_path: str
-    admin_panel_module_settings_path: str
-    admin_panel_modules_path: str
-    admin_panel_companies_path: str
-    admin_panel_company_api_clients_path: str
-    django_api_user: str | None
-    django_api_password: str | None
+    admin_panel_client_bootstrap_path: str
+    admin_panel_client_id: str | None
+    admin_panel_client_secret: str | None
     http_timeout_seconds: float
     sync_on_startup: bool
-    allow_token_proxy: bool
     sync_key: str | None
     redis_host: str
     redis_port: int
@@ -55,32 +48,13 @@ class IntegrationSettings:
         return cls(
             app_module_code=(os.getenv("APP_MODULE_CODE") or "pharmacy_one").strip(),
             admin_panel_base_url=base_url,
-            admin_panel_client_token_path=(
-                os.getenv("ADMIN_PANEL_CLIENT_TOKEN_PATH") or "/api/client-auth/token/"
+            admin_panel_client_bootstrap_path=(
+                os.getenv("ADMIN_PANEL_CLIENT_BOOTSTRAP_PATH") or "/api/client-auth/bootstrap/"
             ).strip(),
-            admin_panel_authorization_path=(
-                os.getenv("ADMIN_PANEL_AUTHORIZATION_PATH") or "/api/authorization/"
-            ).strip(),
-            admin_panel_running_licenses_path=(
-                os.getenv("ADMIN_PANEL_RUNNING_LICENSES_PATH") or "/api/licenses/running/"
-            ).strip(),
-            admin_panel_module_settings_path=(
-                os.getenv("ADMIN_PANEL_MODULE_SETTINGS_PATH") or "/api/module-settings/"
-            ).strip(),
-            admin_panel_modules_path=(
-                os.getenv("ADMIN_PANEL_MODULES_PATH") or "/api/modules/"
-            ).strip(),
-            admin_panel_companies_path=(
-                os.getenv("ADMIN_PANEL_COMPANIES_PATH") or "/api/companies/"
-            ).strip(),
-            admin_panel_company_api_clients_path=(
-                os.getenv("ADMIN_PANEL_COMPANY_API_CLIENTS_PATH") or "/api/company-api-clients/"
-            ).strip(),
-            django_api_user=(os.getenv("DJANGO_API_USER") or "").strip() or None,
-            django_api_password=(os.getenv("DJANGO_API_PASSWORD") or "").strip() or None,
+            admin_panel_client_id=(os.getenv("ADMIN_PANEL_CLIENT_ID") or "").strip() or None,
+            admin_panel_client_secret=(os.getenv("ADMIN_PANEL_CLIENT_SECRET") or "").strip() or None,
             http_timeout_seconds=float(os.getenv("HTTP_TIMEOUT_SECONDS") or 10),
             sync_on_startup=_as_bool(os.getenv("SYNC_ON_STARTUP"), True),
-            allow_token_proxy=_as_bool(os.getenv("ALLOW_TOKEN_PROXY"), False),
             sync_key=(os.getenv("SYNC_KEY") or "").strip() or None,
             redis_host=(os.getenv("REDIS_HOST") or "localhost").strip(),
             redis_port=int(os.getenv("REDIS_PORT") or 6379),

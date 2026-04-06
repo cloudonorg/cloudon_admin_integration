@@ -2,9 +2,8 @@
 
 Reusable FastAPI integration for CloudOn Admin Panel:
 - Bearer JWT validation (`api_client` tokens)
-- Redis-cached entitlement checks (company/module/branch)
-- Sync routes for license/params/full rebuild
-- Optional token proxy
+- Redis-cached entitlement checks (company/module)
+- Bootstrap + sync routes for license/params/company refresh
 - Global API response envelope and exception normalization
 
 ## Install
@@ -39,6 +38,8 @@ wire_integration(app, include_response_envelope=False)
 ```
 
 Relevant env flags:
+- `ADMIN_PANEL_CLIENT_ID` / `ADMIN_PANEL_CLIENT_SECRET` are used to bootstrap the local entitlement cache from the admin panel.
+- `ADMIN_PANEL_CLIENT_BOOTSTRAP_PATH=/api/client-auth/bootstrap/`
 - `REQUIRE_MODULE_PARAMS=true|false` (if true, empty params returns 403)
 - `LICENSE_EXPIRY_WARNING_DAYS=10` (adds success `message` when license is close to expiration)
 
@@ -60,3 +61,11 @@ from cloudon_admin_integration.dependencies import require_module_entitlement_fo
 
 Depends(require_module_entitlement_for("pharmacy_one"))
 ```
+
+## Runtime flow
+
+1. Integration authenticates against the admin panel using `client_id` + `client_secret`.
+2. The bootstrap response returns the client token plus the current entitlement bundle for all licensed modules.
+3. Integration caches the bundle in local Redis as `entitlement:{domain}:{company_code}:{module_code}`.
+4. Admin-panel signals keep the local cache fresh when licenses or module settings change.
+5. API requests only read local Redis and validate the bearer token locally.

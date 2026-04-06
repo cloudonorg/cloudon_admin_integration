@@ -32,9 +32,13 @@ def get_admin_client() -> AdminPanelClient:
 class EntitlementContext(BaseModel):
     company_id: str
     company_code: int | None = None
+    company_name: str | None = None
     module_code: str
+    infrastructure_domain: str | None = None
+    infrastructure_serial_num: str | None = None
     branch_code: int | None = None
     matched_branch: int | None = None
+    selected_branch: dict[str, Any] | None = None
     is_running: bool = False
     license_to_date: str | None = None
     state: str | None = None
@@ -46,10 +50,6 @@ class EntitlementContext(BaseModel):
 def _to_int_or_none(value: Any) -> int | None:
     if value is None:
         return None
-
-
-def _fail(status_code: int, reason: str, message: str) -> None:
-    raise HTTPException(status_code=status_code, detail={"reason": reason, "message": message})
     text = str(value).strip()
     if not text:
         return None
@@ -57,6 +57,10 @@ def _fail(status_code: int, reason: str, message: str) -> None:
         return int(text)
     except ValueError:
         return None
+
+
+def _fail(status_code: int, reason: str, message: str) -> None:
+    raise HTTPException(status_code=status_code, detail={"reason": reason, "message": message})
 
 
 async def require_sync_key(
@@ -77,34 +81,29 @@ async def _require_module_entitlement(
     cache: IntegrationCache,
     cfg: IntegrationSettings,
 ) -> EntitlementContext:
+    header_domain = (request.headers.get("X-Infrastructure-Domain") or request.headers.get("X-Domain") or "").strip() or None
     header_company_code = _to_int_or_none(request.headers.get("X-Company-Code"))
     header_company_id = (request.headers.get("X-Company-Id") or "").strip() or None
     header_branch_code = _to_int_or_none(request.headers.get("X-Branch-Code"))
+    session = await cache.get_client_session(claims.client_id) if claims.client_id else None
 
     token_company_id = str(claims.company_id).strip() if claims.company_id is not None else None
     company_id = header_company_id or token_company_id
     company_code = header_company_code if header_company_code is not None else claims.company_code
+    domain = header_domain or claims.infrastructure_domain
 
-    if not company_id and claims.client_id:
-        mapping = await cache.get_company_by_client_id(claims.client_id)
-        if mapping:
-            company_id = str(mapping.get("company_id") or "").strip() or None
-            if company_code is None:
-                company_code = _to_int_or_none(mapping.get("company_code"))
-
-    if not company_id and company_code:
-        company_ids = await cache.resolve_company_ids(company_code=company_code)
-        if len(company_ids) == 1:
-            company_id = company_ids[0]
-        elif len(company_ids) > 1:
-            _fail(
-                403,
-                "company_ambiguous",
-                "Multiple companies match company_code. Provide X-Company-Id or token company_id.",
-            )
+    if session:
+        company_id = company_id or str(session.get("company_id") or "").strip() or None
+        if company_code is None:
+            company_code = _to_int_or_none(session.get("company_code"))
+        domain = domain or (session.get("infrastructure_domain") or None)
 
     if not company_id:
-        _fail(403, "company_missing", "Could not resolve company_id from token/client mapping/header")
+        _fail(403, "company_missing", "Could not resolve company_id from token/client session/header")
+    if company_code is None:
+        _fail(403, "company_code_missing", "Could not resolve company_code from token/session/header")
+    if not domain:
+        _fail(403, "domain_missing", "Could not resolve infrastructure domain from token/session/header")
 
     token_module = claims.module_code
     if token_module and token_module not in {module_code, "*"}:
@@ -113,7 +112,8 @@ async def _require_module_entitlement(
     branch_code = header_branch_code if header_branch_code is not None else claims.branch_code
     try:
         record = await cache.get_entitlement(
-            company_id=company_id,
+            domain=domain,
+            company_code=company_code,
             module_code=module_code,
             branch_code=branch_code,
         )
@@ -147,9 +147,13 @@ async def _require_module_entitlement(
     return EntitlementContext(
         company_id=company_id,
         company_code=_to_int_or_none(record.get("company_code")) or company_code,
+        company_name=(record.get("company") or {}).get("name") if isinstance(record.get("company"), dict) else claims.company_name,
         module_code=module_code,
+        infrastructure_domain=(record.get("domain") or domain),
+        infrastructure_serial_num=record.get("infrastructure_serial_num") or claims.infrastructure_serial_num,
         branch_code=branch_code,
         matched_branch=_to_int_or_none(record.get("_matched_branch")),
+        selected_branch=record.get("_selected_branch"),
         is_running=bool(record.get("is_running")),
         license_to_date=record.get("license_to_date"),
         state=record.get("state"),
@@ -199,16 +203,15 @@ async def perform_full_sync(
     cache_client = cache or _cache
     api_client = admin_client or _admin_client
 
-    payload = await api_client.fetch_full_sync_payload()
-    records = api_client.normalize_full_sync_records(payload)
-    client_mappings = api_client.normalize_client_mappings(payload)
+    payload = await api_client.bootstrap_client_bundle()
+    records, client_session = api_client.normalize_bootstrap_bundle(payload)
 
     now = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
     for record in records:
         record["updated_at"] = now
-        record["source"] = "full_sync"
+        record["source"] = "bootstrap"
 
-    rebuild_info = await cache_client.rebuild(records, client_mappings=client_mappings)
+    rebuild_info = await cache_client.rebuild(records, client_session=client_session)
     return {
         "records": len(records),
         "rebuild": rebuild_info,
@@ -227,11 +230,11 @@ async def startup_integration() -> None:
     if settings.sync_on_startup:
         try:
             result = await perform_full_sync()
-            logger.info("Initial full sync complete: %s", result)
+            logger.info("Initial bootstrap sync complete: %s", result)
         except httpx.HTTPError as exc:
-            logger.warning("Initial full sync skipped (admin panel unavailable): %s", exc)
+            logger.warning("Initial bootstrap sync skipped (admin panel unavailable): %s", exc)
         except Exception as exc:  # pragma: no cover
-            logger.warning("Initial full sync failed: %s", exc)
+            logger.warning("Initial bootstrap sync failed: %s", exc)
 
 
 async def shutdown_integration() -> None:

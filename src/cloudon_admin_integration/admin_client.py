@@ -78,225 +78,108 @@ class AdminPanelClient:
             response.raise_for_status()
             return response.json()
 
-    async def _request_paginated(
-        self,
-        path: str,
-        *,
-        headers: dict[str, str] | None = None,
-    ) -> list[dict[str, Any]]:
-        timeout = httpx.Timeout(self.cfg.http_timeout_seconds)
-        out: list[dict[str, Any]] = []
-        next_url = self.cfg.admin_url(path)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            while next_url:
-                response = await client.get(next_url, headers=headers)
-                response.raise_for_status()
-                payload = response.json()
-                if isinstance(payload, list):
-                    out.extend([x for x in payload if isinstance(x, dict)])
-                    break
-                if isinstance(payload, dict):
-                    out.extend(_extract_items(payload))
-                    raw_next = payload.get("next")
-                    next_url = raw_next if isinstance(raw_next, str) and raw_next else None
-                    continue
-                break
-        return out
-
-    async def _get_admin_user_token(self) -> str:
-        if not self.cfg.django_api_user or not self.cfg.django_api_password:
-            raise httpx.HTTPError("DJANGO_API_USER and DJANGO_API_PASSWORD are required for full sync")
+    async def bootstrap_client_bundle(self) -> dict[str, Any]:
+        if not self.cfg.admin_panel_client_id or not self.cfg.admin_panel_client_secret:
+            raise httpx.HTTPError("ADMIN_PANEL_CLIENT_ID and ADMIN_PANEL_CLIENT_SECRET are required for bootstrap")
         payload = {
-            "username": self.cfg.django_api_user,
-            "password": self.cfg.django_api_password,
+            "client_id": self.cfg.admin_panel_client_id,
+            "client_secret": self.cfg.admin_panel_client_secret,
         }
-        data = await self._request_json("POST", self.cfg.admin_panel_authorization_path, json_body=payload)
-        if not isinstance(data, dict) or not data.get("access"):
-            raise httpx.HTTPError("Could not obtain admin JWT from /api/authorization/")
-        return str(data["access"])
-
-    async def fetch_full_sync_payload(self) -> dict[str, Any]:
-        token = await self._get_admin_user_token()
-        headers = {"Authorization": f"Bearer {token}"}
-        running_licenses = await self._request_paginated(self.cfg.admin_panel_running_licenses_path, headers=headers)
-        module_settings = await self._request_paginated(self.cfg.admin_panel_module_settings_path, headers=headers)
-        modules = await self._request_paginated(self.cfg.admin_panel_modules_path, headers=headers)
-        companies = await self._request_paginated(self.cfg.admin_panel_companies_path, headers=headers)
-        company_api_clients = await self._request_paginated(
-            self.cfg.admin_panel_company_api_clients_path,
-            headers=headers,
-        )
-        return {
-            "running_licenses": running_licenses,
-            "module_settings": module_settings,
-            "modules": modules,
-            "companies": companies,
-            "company_api_clients": company_api_clients,
-        }
-
-    async def proxy_client_token(self, payload: dict[str, Any]) -> dict[str, Any]:
         data = await self._request_json(
             "POST",
-            self.cfg.admin_panel_client_token_path,
+            self.cfg.admin_panel_client_bootstrap_path,
             json_body=payload,
         )
         if not isinstance(data, dict):
-            raise httpx.HTTPError("Unexpected token response shape")
+            raise httpx.HTTPError("Unexpected bootstrap response shape")
         return data
 
-    def _build_id_code_map(self, items: list[dict[str, Any]], *, code_fields: tuple[str, ...]) -> dict[str, str]:
-        out: dict[str, str] = {}
-        for item in items:
-            code = None
-            for field in code_fields:
-                code = _norm(item.get(field))
-                if code:
-                    break
-            if not code:
-                continue
-            for id_field in ("id", "pk", "module_id", "company_id"):
-                raw_id = item.get(id_field)
-                if raw_id is not None:
-                    out[str(raw_id)] = code
-        return out
-
-    def normalize_full_sync_records(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    def normalize_bootstrap_bundle(self, payload: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        company = payload.get("company") if isinstance(payload.get("company"), dict) else {}
+        infrastructure = payload.get("infrastructure") if isinstance(payload.get("infrastructure"), dict) else {}
         modules = _extract_items(payload.get("modules"))
-        companies = _extract_items(payload.get("companies"))
-        licenses = _extract_items(payload.get("running_licenses"))
-        settings = _extract_items(payload.get("module_settings"))
 
-        module_map = self._build_id_code_map(modules, code_fields=("module_code", "code", "name"))
-        company_map = self._build_id_code_map(companies, code_fields=("company_code", "code", "name"))
-        company_code_to_ids: dict[str, set[str]] = {}
-        for comp in companies:
-            comp_id, comp_code = _extract_id_and_code(comp)
-            if comp_id and comp_code:
-                company_code_to_ids.setdefault(comp_code, set()).add(comp_id)
+        company_id = _norm(company.get("id") or payload.get("company_id"))
+        company_code = _to_int_or_none(company.get("code") or payload.get("company_code"))
+        domain = _norm(infrastructure.get("domain") or payload.get("infrastructure_domain"))
+        serial_num = _norm(infrastructure.get("serial_num") or payload.get("infrastructure_serial_num"))
+        infrastructure_id = _norm(infrastructure.get("id") or payload.get("infrastructure_id"))
 
-        records: dict[tuple[str, str, str | None], dict[str, Any]] = {}
-        for lic in licenses:
-            module_code = _norm(lic.get("module_code")) or module_map.get(str(lic.get("module_id")))
-            company_id, company_code_nested = _extract_id_and_code(lic.get("company"))
-            company_id = company_id or _norm(lic.get("company_id")) or _norm(lic.get("company"))
-            company_code = (
-                _norm(lic.get("company_code"))
-                or company_code_nested
-                or company_map.get(str(lic.get("company_id")))
-            )
-            if not company_id and company_code:
-                ids = sorted(company_code_to_ids.get(company_code, set()))
-                if len(ids) == 1:
-                    company_id = ids[0]
-            branch_code = _norm(lic.get("branch_code"))
-            if not module_code or not company_id:
+        records: list[dict[str, Any]] = []
+        for item in modules:
+            module_code = _norm(item.get("module") or item.get("module_code"))
+            if not module_code:
                 continue
             if (not self.cfg.cache_all_modules) and module_code != self.cfg.app_module_code:
                 continue
 
-            state = _norm(lic.get("state"))
-            revoked_at = _norm(lic.get("revoked_at"))
-            to_date = _safe_date(lic.get("to_date") or lic.get("license_to_date"))
-            is_running = str(state or "").lower() in {"running", "active", "enabled", "1", "true"}
-            if revoked_at:
-                is_running = False
-
-            key = (company_id, module_code, branch_code)
-            records[key] = {
-                "company_id": company_id,
-                "company_code": _to_int_or_none(company_code),
-                "module_code": module_code,
-                "branch_code": _to_int_or_none(branch_code),
-                "is_running": is_running,
-                "license_to_date": to_date,
-                "state": state,
-                "revoked_at": revoked_at,
-                "params": {},
-                "source": "full_sync",
-                "updated_at": "",
-                "metadata": {"from": "running_licenses"},
-            }
-
-        for item in settings:
-            module_ref = item.get("module_id")
-            if module_ref is None:
-                module_ref = item.get("module")
-            module_code = _norm(item.get("module_code")) or module_map.get(str(module_ref))
-            company_id, company_code_nested = _extract_id_and_code(item.get("company"))
-            company_id = company_id or _norm(item.get("company_id")) or _norm(item.get("company"))
-            company_code = (
-                _norm(item.get("company_code"))
-                or company_code_nested
-                or company_map.get(str(item.get("company_id")))
-            )
-            if not company_id and company_code:
-                ids = sorted(company_code_to_ids.get(company_code, set()))
-                if len(ids) == 1:
-                    company_id = ids[0]
-            branch_code = _norm(item.get("branch_code"))
-            if not module_code or not company_id:
-                continue
-            if (not self.cfg.cache_all_modules) and module_code != self.cfg.app_module_code:
-                continue
-
-            key = (company_id, module_code, branch_code)
-            record = records.setdefault(
-                key,
+            license_payload = item.get("license") if isinstance(item.get("license"), dict) else {}
+            parameters = item.get("parameters") if isinstance(item.get("parameters"), dict) else {}
+            records.append(
                 {
+                    "company": {
+                        "id": company_id,
+                        "code": company_code,
+                        "name": company.get("name"),
+                        "title": company.get("title"),
+                    },
+                    "infrastructure": {
+                        "id": infrastructure_id,
+                        "serial_num": serial_num,
+                        "domain": domain,
+                        "name": infrastructure.get("name"),
+                    },
                     "company_id": company_id,
-                    "company_code": _to_int_or_none(company_code),
+                    "company_code": company_code,
                     "module_code": module_code,
-                    "branch_code": _to_int_or_none(branch_code),
-                    "is_running": False,
-                    "license_to_date": None,
-                    "state": None,
-                    "revoked_at": None,
-                    "params": {},
-                    "source": "full_sync",
-                    "updated_at": "",
-                    "metadata": {"from": "module_settings_only"},
-                },
-            )
-
-            if isinstance(item.get("data"), dict):
-                record["params"].update(item["data"])
-                continue
-
-            if isinstance(item.get("params"), dict):
-                record["params"].update(item["params"])
-                continue
-
-            p_key = _norm(item.get("param_key") or item.get("key") or item.get("name"))
-            if p_key:
-                record["params"][p_key] = item.get("param_value", item.get("value"))
-
-        return list(records.values())
-
-    def normalize_client_mappings(self, payload: dict[str, Any]) -> list[dict[str, str]]:
-        companies = _extract_items(payload.get("companies"))
-        company_api_clients = _extract_items(payload.get("company_api_clients"))
-
-        code_by_id: dict[str, str] = {}
-        for comp in companies:
-            comp_id, comp_code = _extract_id_and_code(comp)
-            if comp_id and comp_code:
-                code_by_id[comp_id] = comp_code
-
-        mappings: list[dict[str, str]] = []
-        for row in company_api_clients:
-            client_id = _norm(row.get("client_id"))
-            if not client_id:
-                continue
-            company_id, _company_code_nested = _extract_id_and_code(row.get("company"))
-            company_id = company_id or _norm(row.get("company_id")) or _norm(row.get("company"))
-            if not company_id:
-                continue
-            company_code = code_by_id.get(company_id) or _norm(row.get("company_code"))
-            mappings.append(
-                {
-                    "client_id": client_id,
-                    "company_id": company_id,
-                    "company_code": _to_int_or_none(company_code),
+                    "module_id": _norm(item.get("module_id")),
+                    "module_name": _norm(item.get("module_name")) or module_code,
+                    "domain": domain,
+                    "infrastructure_id": infrastructure_id,
+                    "infrastructure_serial_num": serial_num,
+                    "is_running": (license_payload.get("status") or "").lower() == "active",
+                    "license_to_date": _safe_date(
+                        license_payload.get("expiration_date")
+                        or license_payload.get("license_to_date")
+                        or license_payload.get("to_date")
+                    ),
+                    "license": {
+                        "id": _norm(license_payload.get("id")),
+                        "from_date": _safe_date(license_payload.get("from_date")),
+                        "expiration_date": _safe_date(
+                            license_payload.get("expiration_date")
+                            or license_payload.get("license_to_date")
+                            or license_payload.get("to_date")
+                        ),
+                        "state": _norm(license_payload.get("state")),
+                        "status": _norm(license_payload.get("status")),
+                        "revoked_at": _norm(license_payload.get("revoked_at")),
+                        "hash": _norm(license_payload.get("hash")),
+                        "number_of_users": license_payload.get("number_of_users"),
+                    },
+                    "state": _norm(license_payload.get("state")),
+                    "revoked_at": _norm(license_payload.get("revoked_at")),
+                    "params": parameters,
+                    "updated_at": payload.get("generated_at") or "",
+                    "source": "bootstrap",
+                    "metadata": {"from": "admin_panel_bootstrap"},
                 }
             )
-        return mappings
+
+        client_session = {
+            "client_id": _norm(payload.get("client_id")),
+            "access": _norm(payload.get("access")),
+            "token_type": _norm(payload.get("token_type")) or "Bearer",
+            "expires_at": _norm(payload.get("expires_at")),
+            "expires_in": payload.get("expires_in"),
+            "company_id": company_id,
+            "company_code": company_code,
+            "company_name": company.get("name"),
+            "infrastructure_id": infrastructure_id,
+            "infrastructure_serial_num": serial_num,
+            "infrastructure_domain": domain,
+            "module_code": _norm(payload.get("module_code")),
+            "branch_code": _norm(payload.get("branch_code")),
+            "updated_at": payload.get("generated_at") or "",
+        }
+        return records, client_session

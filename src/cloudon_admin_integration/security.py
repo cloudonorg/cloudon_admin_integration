@@ -16,6 +16,10 @@ class ApiClientClaims(BaseModel):
     client_id: str | None = None
     company_id: str | None = None
     company_code: int | None = None
+    company_name: str | None = None
+    infrastructure_id: str | None = None
+    infrastructure_serial_num: str | None = None
+    infrastructure_domain: str | None = None
     branch_code: int | None = None
     module_code: str | None = None
     iat: int | None = None
@@ -85,6 +89,10 @@ async def require_valid_api_client_token(
         client_id=decoded.get("client_id"),
         company_id=(str(decoded.get("company_id")).strip() if decoded.get("company_id") is not None else None),
         company_code=company_code,
+        company_name=(decoded.get("company_name") or None),
+        infrastructure_id=(decoded.get("infrastructure_id") or None),
+        infrastructure_serial_num=(decoded.get("infrastructure_serial_num") or None),
+        infrastructure_domain=(decoded.get("infrastructure_domain") or None),
         branch_code=_to_int_or_none(decoded.get("branch_code")),
         module_code=token_module_code,
         iat=decoded.get("iat"),
