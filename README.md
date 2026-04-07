@@ -139,9 +139,11 @@ If you want the smallest possible integration surface in an external FastAPI app
 5. Call `POST /auth/token` on the external API to bootstrap and cache the client's full entitlement bundle.
 6. Call `GET /admin/parameters` to inspect the full local cached bundle in the same compact shape.
 
-The admin-panel URL, Redis, and bootstrap credentials are still runtime settings for the external API process, but they can live in shared deployment env/secrets rather than being hardcoded in the app itself. If you keep the default HS256 flow, the client secret doubles as the JWT verification key.
+The admin-panel URL and Redis are still runtime settings for the external API process, but they can live in shared deployment env/secrets rather than being hardcoded in the app itself. If you keep the default HS256 flow, the client secret doubles as the JWT verification key.
 
-Webhook refreshes are simplest when they target `POST /sync-redis-data`. The legacy `/sync-single-license`, `/sync-single-param`, and `/sync-company-change` routes remain compatibility aliases and now perform a full cache refresh too.
+Webhook refreshes should target `POST /sync-redis-data` with the same `SYNC_KEY` that the backend sends in `X-Sync-Key`. The middleware now patches Redis directly from the webhook payload, so UI changes propagate without a full re-bootstrap. The legacy `/sync-single-license`, `/sync-single-param`, and `/sync-company-change` routes remain compatibility aliases and now apply the same incremental update logic.
+
+`ADMIN_PANEL_CLIENT_ID` and `ADMIN_PANEL_CLIENT_SECRET` are only needed if you want `sync_on_startup=true` or you call `/auth/token` from a background job to prewarm the cache. They are not required for normal backend webhook refreshes.
 
 ## Runtime flow
 

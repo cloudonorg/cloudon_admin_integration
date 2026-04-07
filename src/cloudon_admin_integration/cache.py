@@ -164,6 +164,7 @@ class IntegrationCache:
         infrastructure_serial_num: str | None = None,
         company_name: str | None = None,
         infrastructure_domain: str | None = None,
+        module_name: str | None = None,
         is_running: bool,
         license_to_date: str | None,
         license: dict[str, Any] | None = None,
@@ -175,24 +176,38 @@ class IntegrationCache:
         redis_conn = self._ensure()
         key = self._key(domain or infrastructure_domain, company_code, module_code)
         existing = await self._get_record_by_key(key) or {}
+        company_data = dict(existing.get("company") or {})
+        infrastructure_data = dict(existing.get("infrastructure") or {})
+        if company_id is not None:
+            company_data["id"] = company_id
+        if company_code is not None:
+            company_data["code"] = int(company_code) if str(company_code).isdigit() else company_code
+        if company_name is not None:
+            company_data["name"] = company_name
+        if infrastructure_id is not None:
+            infrastructure_data["id"] = infrastructure_id
+        if infrastructure_serial_num is not None:
+            infrastructure_data["serial_num"] = infrastructure_serial_num
+        if domain is not None or infrastructure_domain is not None:
+            infrastructure_data["domain"] = domain or infrastructure_domain
         record = {
-            "company": existing.get("company") or {
+            "company": company_data or {
                 "id": company_id,
                 "code": company_code,
                 "name": company_name,
             },
-            "infrastructure": existing.get("infrastructure") or {
+            "infrastructure": infrastructure_data or {
                 "id": infrastructure_id,
                 "serial_num": infrastructure_serial_num,
                 "domain": domain or infrastructure_domain,
             },
             "company_id": company_id or existing.get("company_id"),
             "company_code": int(company_code) if str(company_code).isdigit() else company_code,
-            "domain": domain or infrastructure_domain,
+            "domain": domain or infrastructure_domain or existing.get("domain"),
             "infrastructure_id": infrastructure_id or existing.get("infrastructure_id"),
             "infrastructure_serial_num": infrastructure_serial_num or existing.get("infrastructure_serial_num"),
             "module_code": module_code,
-            "module_name": existing.get("module_name"),
+            "module_name": module_name or existing.get("module_name"),
             "is_running": bool(is_running),
             "license_to_date": license_to_date,
             "license": license or existing.get("license") or {},
@@ -219,34 +234,61 @@ class IntegrationCache:
         infrastructure_serial_num: str | None = None,
         company_name: str | None = None,
         infrastructure_domain: str | None = None,
+        module_name: str | None = None,
         source: str,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         redis_conn = self._ensure()
         key = self._key(domain or infrastructure_domain, company_code, module_code)
+        company_data = {
+            "id": company_id,
+            "code": int(company_code) if str(company_code).isdigit() else company_code,
+            "name": company_name,
+        }
+        infrastructure_data = {
+            "id": infrastructure_id,
+            "serial_num": infrastructure_serial_num,
+            "domain": domain or infrastructure_domain,
+        }
         existing = await self._get_record_by_key(key) or {
-            "company": {
-                "id": company_id,
-                "code": company_code,
-                "name": company_name,
-            },
-            "infrastructure": {
-                "id": infrastructure_id,
-                "serial_num": infrastructure_serial_num,
-                "domain": domain or infrastructure_domain,
-            },
+            "company": company_data,
+            "infrastructure": infrastructure_data,
             "company_id": company_id,
             "company_code": int(company_code) if str(company_code).isdigit() else company_code,
             "domain": domain or infrastructure_domain,
             "infrastructure_id": infrastructure_id,
             "infrastructure_serial_num": infrastructure_serial_num,
             "module_code": module_code,
+            "module_name": module_name,
             "is_running": False,
             "license_to_date": None,
             "license": {},
             "state": None,
             "revoked_at": None,
         }
+        existing_company = dict(existing.get("company") or {})
+        existing_infrastructure = dict(existing.get("infrastructure") or {})
+        if company_id is not None:
+            existing_company["id"] = company_id
+        if company_code is not None:
+            existing_company["code"] = int(company_code) if str(company_code).isdigit() else company_code
+        if company_name is not None:
+            existing_company["name"] = company_name
+        if infrastructure_id is not None:
+            existing_infrastructure["id"] = infrastructure_id
+        if infrastructure_serial_num is not None:
+            existing_infrastructure["serial_num"] = infrastructure_serial_num
+        if domain is not None or infrastructure_domain is not None:
+            existing_infrastructure["domain"] = domain or infrastructure_domain
+        if module_name is not None:
+            existing["module_name"] = module_name
+        existing["company"] = existing_company or company_data
+        existing["infrastructure"] = existing_infrastructure or infrastructure_data
+        existing["company_id"] = company_id or existing.get("company_id")
+        existing["company_code"] = int(company_code) if str(company_code).isdigit() else company_code
+        existing["domain"] = domain or infrastructure_domain or existing.get("domain")
+        existing["infrastructure_id"] = infrastructure_id or existing.get("infrastructure_id")
+        existing["infrastructure_serial_num"] = infrastructure_serial_num or existing.get("infrastructure_serial_num")
         existing["params"] = copy.deepcopy(params or {})
         existing["updated_at"] = utc_now_iso()
         existing["source"] = source
@@ -269,6 +311,256 @@ class IntegrationCache:
         deleted = await redis_conn.delete(key)
         await redis_conn.srem(self._index_key, key)
         return deleted
+
+    @staticmethod
+    def _record_matches_scope(
+        record: dict[str, Any],
+        *,
+        company_id: str | None = None,
+        company_code: str | int | None = None,
+        domain: str | None = None,
+    ) -> bool:
+        checks = []
+        if company_id is not None:
+            checks.append(str(record.get("company_id")) == str(company_id))
+        if company_code is not None:
+            checks.append(str(record.get("company_code")) == str(company_code))
+        if domain is not None:
+            record_domain = record.get("domain") or record.get("infrastructure", {}).get("domain")
+            checks.append(str(record_domain) == str(domain))
+        return any(checks) if checks else False
+
+    @staticmethod
+    def _session_matches_scope(
+        session: dict[str, Any],
+        *,
+        company_id: str | None = None,
+        company_code: str | int | None = None,
+        domain: str | None = None,
+    ) -> bool:
+        checks = []
+        if company_id is not None:
+            checks.append(str(session.get("company_id")) == str(company_id))
+        if company_code is not None:
+            checks.append(str(session.get("company_code")) == str(company_code))
+        if domain is not None:
+            checks.append(str(session.get("infrastructure_domain")) == str(domain))
+        return any(checks) if checks else False
+
+    async def update_company_metadata(
+        self,
+        *,
+        company_id: str | None = None,
+        company_code: str | int | None = None,
+        company_name: str | None = None,
+        infrastructure_id: str | None = None,
+        infrastructure_serial_num: str | None = None,
+        infrastructure_domain: str | None = None,
+        source: str = "company_sync",
+    ) -> dict[str, int]:
+        redis_conn = self._ensure()
+        keys = sorted(await redis_conn.smembers(self._index_key))
+        updated_records = 0
+        updated_sessions = 0
+        pipe = redis_conn.pipeline(transaction=False)
+
+        for key in keys:
+            record = await self._get_record_by_key(key)
+            if not record or not self._record_matches_scope(
+                record,
+                company_id=company_id,
+                company_code=company_code,
+                domain=infrastructure_domain,
+            ):
+                continue
+            normalized = dict(record)
+            company = dict(normalized.get("company") or {})
+            infrastructure = dict(normalized.get("infrastructure") or {})
+            if company_id is not None:
+                company["id"] = company_id
+                normalized["company_id"] = company_id
+            if company_code is not None:
+                company["code"] = int(company_code) if str(company_code).isdigit() else company_code
+                normalized["company_code"] = company["code"]
+            if company_name is not None:
+                company["name"] = company_name
+                normalized["company_name"] = company_name
+            if infrastructure_id is not None:
+                infrastructure["id"] = infrastructure_id
+                normalized["infrastructure_id"] = infrastructure_id
+            if infrastructure_serial_num is not None:
+                infrastructure["serial_num"] = infrastructure_serial_num
+                normalized["infrastructure_serial_num"] = infrastructure_serial_num
+            if infrastructure_domain is not None:
+                infrastructure["domain"] = infrastructure_domain
+                normalized["domain"] = infrastructure_domain
+            normalized["company"] = company
+            normalized["infrastructure"] = infrastructure
+            normalized["updated_at"] = utc_now_iso()
+            normalized["source"] = source
+            normalized.pop("_cache_key", None)
+            normalized.pop("_matched_branch", None)
+            normalized.pop("_selected_branch", None)
+            pipe.set(key, json.dumps(normalized))
+            updated_records += 1
+
+        session_keys = sorted(await redis_conn.smembers(self._session_index_key))
+        for session_key in session_keys:
+            raw = await redis_conn.get(session_key)
+            if not raw:
+                continue
+            session = json.loads(raw)
+            if not isinstance(session, dict):
+                continue
+            if not self._session_matches_scope(
+                session,
+                company_id=company_id,
+                company_code=company_code,
+                domain=infrastructure_domain,
+            ):
+                continue
+            normalized = dict(session)
+            if company_id is not None:
+                normalized["company_id"] = company_id
+            if company_code is not None:
+                normalized["company_code"] = int(company_code) if str(company_code).isdigit() else company_code
+            if company_name is not None:
+                normalized["company_name"] = company_name
+            if infrastructure_id is not None:
+                normalized["infrastructure_id"] = infrastructure_id
+            if infrastructure_serial_num is not None:
+                normalized["infrastructure_serial_num"] = infrastructure_serial_num
+            if infrastructure_domain is not None:
+                normalized["infrastructure_domain"] = infrastructure_domain
+            normalized["updated_at"] = utc_now_iso()
+            pipe.set(session_key, json.dumps(normalized))
+            updated_sessions += 1
+
+        if updated_records or updated_sessions:
+            await pipe.execute()
+        return {"updated_records": updated_records, "updated_sessions": updated_sessions}
+
+    async def delete_company_records(
+        self,
+        *,
+        company_id: str | None = None,
+        company_code: str | int | None = None,
+        infrastructure_domain: str | None = None,
+    ) -> dict[str, int]:
+        redis_conn = self._ensure()
+        keys = sorted(await redis_conn.smembers(self._index_key))
+        deleted_records = 0
+        deleted_sessions = 0
+        pipe = redis_conn.pipeline(transaction=False)
+
+        for key in keys:
+            record = await self._get_record_by_key(key)
+            if not record or not self._record_matches_scope(
+                record,
+                company_id=company_id,
+                company_code=company_code,
+                domain=infrastructure_domain,
+            ):
+                continue
+            pipe.delete(key)
+            pipe.srem(self._index_key, key)
+            deleted_records += 1
+
+        session_keys = sorted(await redis_conn.smembers(self._session_index_key))
+        for session_key in session_keys:
+            raw = await redis_conn.get(session_key)
+            if not raw:
+                continue
+            session = json.loads(raw)
+            if not isinstance(session, dict):
+                continue
+            if not self._session_matches_scope(
+                session,
+                company_id=company_id,
+                company_code=company_code,
+                domain=infrastructure_domain,
+            ):
+                continue
+            pipe.delete(session_key)
+            pipe.srem(self._session_index_key, session_key)
+            deleted_sessions += 1
+
+        if deleted_records or deleted_sessions:
+            await pipe.execute()
+        return {"deleted_records": deleted_records, "deleted_sessions": deleted_sessions}
+
+    async def upsert_module_metadata(
+        self,
+        module_code: str,
+        *,
+        module_name: str | None = None,
+        source: str = "module_sync",
+    ) -> dict[str, int]:
+        redis_conn = self._ensure()
+        keys = sorted(await redis_conn.smembers(self._index_key))
+        updated_records = 0
+        pipe = redis_conn.pipeline(transaction=False)
+
+        for key in keys:
+            record = await self._get_record_by_key(key)
+            if not record or str(record.get("module_code")) != str(module_code):
+                continue
+            normalized = dict(record)
+            if module_name is not None:
+                normalized["module_name"] = module_name
+            normalized["updated_at"] = utc_now_iso()
+            normalized["source"] = source
+            normalized.pop("_cache_key", None)
+            normalized.pop("_matched_branch", None)
+            normalized.pop("_selected_branch", None)
+            pipe.set(key, json.dumps(normalized))
+            updated_records += 1
+
+        if updated_records:
+            await pipe.execute()
+        return {"updated_records": updated_records}
+
+    async def delete_module_records(self, module_code: str) -> dict[str, int]:
+        redis_conn = self._ensure()
+        keys = sorted(await redis_conn.smembers(self._index_key))
+        deleted_records = 0
+        pipe = redis_conn.pipeline(transaction=False)
+
+        for key in keys:
+            record = await self._get_record_by_key(key)
+            if not record or str(record.get("module_code")) != str(module_code):
+                continue
+            pipe.delete(key)
+            pipe.srem(self._index_key, key)
+            deleted_records += 1
+
+        if deleted_records:
+            await pipe.execute()
+        return {"deleted_records": deleted_records}
+
+    async def clear_params(
+        self,
+        domain: str | None,
+        company_code: str | int,
+        module_code: str,
+        *,
+        source: str = "module_settings_delete",
+    ) -> dict[str, int]:
+        redis_conn = self._ensure()
+        key = self._key(domain, company_code, module_code)
+        record = await self._get_record_by_key(key)
+        if not record:
+            return {"updated_records": 0}
+        normalized = dict(record)
+        normalized["params"] = {}
+        normalized["updated_at"] = utc_now_iso()
+        normalized["source"] = source
+        normalized.pop("_cache_key", None)
+        normalized.pop("_matched_branch", None)
+        normalized.pop("_selected_branch", None)
+        await redis_conn.set(key, json.dumps(normalized))
+        await redis_conn.sadd(self._index_key, key)
+        return {"updated_records": 1}
 
     async def rebuild(
         self,
