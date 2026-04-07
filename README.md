@@ -3,7 +3,7 @@
 Reusable FastAPI integration for CloudOn Admin Panel:
 - Public `/auth/token` bootstrap endpoint for external APIs
 - Bearer JWT validation (`api_client` tokens)
-- Redis-cached entitlement checks (company/module)
+- Redis-cached entitlement checks (module license/parameters)
 - Bootstrap + sync routes for license/params/company refresh
 - Global API response envelope and exception normalization
 
@@ -55,7 +55,11 @@ from cloudon_admin_integration.dependencies import EntitlementContext, require_m
 
 @app.get("/hello")
 async def hello(entitlement: EntitlementContext = Depends(require_module_entitlement)):
-    return {"company_id": entitlement.company_id, "params": entitlement.params}
+    return {
+        "module": entitlement.module,
+        "license": entitlement.license.model_dump(),
+        "parameters": entitlement.parameters,
+    }
 ```
 
 For per-endpoint module checks:
@@ -75,7 +79,7 @@ from cloudon_admin_integration.dependencies import EntitlementsContext
 
 @app.get("/entitlements")
 async def entitlements(ctx: EntitlementsContext = Depends(require_module_entitlements)):
-    return [item.model_dump() for item in ctx.entitlements]
+    return ctx.model_dump()
 ```
 
 To scope that same bundle to one or more modules:
@@ -87,7 +91,20 @@ from cloudon_admin_integration.config import settings
 Depends(require_module_entitlements_for(settings.app_module_codes))
 ```
 
-The singular helpers still return one `EntitlementContext`. The plural helpers return an `EntitlementsContext` wrapper with an `entitlements` list and accept no module filter, one module code, or multiple module codes.
+The singular helpers still return one `EntitlementContext`, but its public dump is intentionally small:
+
+```json
+{
+  "module": "rapid_test",
+  "license": {
+    "expiration_date": "2026-08-21",
+    "status": "active"
+  },
+  "parameters": {}
+}
+```
+
+The plural helpers return an `EntitlementsContext` list-like root model, so `ctx.model_dump()` yields a plain list of the same module objects.
 
 ## Minimal external API setup
 
@@ -107,6 +124,6 @@ Webhook refreshes are simplest when they target `POST /sync-redis-data`. The leg
 
 1. Integration authenticates against the admin panel using `client_id` + `client_secret`.
 2. The bootstrap response returns the client token plus the current entitlement bundle for all licensed modules.
-3. Integration caches the bundle in local Redis as `entitlement:{domain}:{company_code}:{module_code}`.
+3. Integration caches the bundle in local Redis as `entitlement:{domain}:{company_code}:{module_code}` and exposes a compact `{"module", "license", "parameters"}` view to app code.
 4. Admin-panel signals keep the local cache fresh when licenses or module settings change.
 5. API requests only read local Redis and validate the bearer token locally.

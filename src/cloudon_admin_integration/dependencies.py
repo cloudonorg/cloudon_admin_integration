@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 from fastapi import Depends, Header, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, RootModel
 
 from cloudon_admin_integration.admin_client import AdminPanelClient
 from cloudon_admin_integration.cache import IntegrationCache, is_license_current, parse_date_or_none
@@ -76,34 +76,96 @@ async def bootstrap_and_cache_client(
     return response
 
 
+class EntitlementLicenseContext(BaseModel):
+    expiration_date: str | None = None
+    status: str | None = None
+
+
 class EntitlementContext(BaseModel):
-    company_id: str
-    company_code: int | None = None
-    company_name: str | None = None
-    module_code: str
-    infrastructure_domain: str | None = None
-    infrastructure_serial_num: str | None = None
-    branch_code: int | None = None
-    matched_branch: int | None = None
-    selected_branch: dict[str, Any] | None = None
-    is_running: bool = False
-    license_to_date: str | None = None
-    state: str | None = None
-    revoked_at: str | None = None
-    params: dict[str, Any] = Field(default_factory=dict)
-    claims: dict[str, Any] = Field(default_factory=dict)
+    module: str
+    license: EntitlementLicenseContext
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
+    company_id: str | None = Field(default=None, exclude=True)
+    company_code: int | None = Field(default=None, exclude=True)
+    company_name: str | None = Field(default=None, exclude=True)
+    infrastructure_domain: str | None = Field(default=None, exclude=True)
+    infrastructure_serial_num: str | None = Field(default=None, exclude=True)
+    branch_code: int | None = Field(default=None, exclude=True)
+    matched_branch: int | None = Field(default=None, exclude=True)
+    selected_branch: dict[str, Any] | None = Field(default=None, exclude=True)
+    is_running: bool = Field(default=False, exclude=True)
+    license_to_date: str | None = Field(default=None, exclude=True)
+    state: str | None = Field(default=None, exclude=True)
+    revoked_at: str | None = Field(default=None, exclude=True)
+    client_id: str | None = Field(default=None, exclude=True)
+    claims: dict[str, Any] = Field(default_factory=dict, exclude=True)
+
+    @property
+    def module_code(self) -> str:
+        return self.module
+
+    @property
+    def params(self) -> dict[str, Any]:
+        return self.parameters
 
 
-class EntitlementsContext(BaseModel):
-    client_id: str | None = None
-    company_id: str
-    company_code: int | None = None
-    company_name: str | None = None
-    infrastructure_domain: str | None = None
-    infrastructure_serial_num: str | None = None
-    branch_code: int | None = None
-    entitlements: list[EntitlementContext] = Field(default_factory=list)
-    claims: dict[str, Any] = Field(default_factory=dict)
+class EntitlementsContext(RootModel[list[EntitlementContext]]):
+    @property
+    def entitlements(self) -> list[EntitlementContext]:
+        return self.root
+
+    def __iter__(self):
+        return iter(self.root)
+
+    def __len__(self) -> int:
+        return len(self.root)
+
+    def __getitem__(self, item):
+        return self.root[item]
+
+    def _first(self) -> EntitlementContext | None:
+        return self.root[0] if self.root else None
+
+    @property
+    def client_id(self) -> str | None:
+        first = self._first()
+        return first.client_id if first else None
+
+    @property
+    def company_id(self) -> str | None:
+        first = self._first()
+        return first.company_id if first else None
+
+    @property
+    def company_code(self) -> int | None:
+        first = self._first()
+        return first.company_code if first else None
+
+    @property
+    def company_name(self) -> str | None:
+        first = self._first()
+        return first.company_name if first else None
+
+    @property
+    def infrastructure_domain(self) -> str | None:
+        first = self._first()
+        return first.infrastructure_domain if first else None
+
+    @property
+    def infrastructure_serial_num(self) -> str | None:
+        first = self._first()
+        return first.infrastructure_serial_num if first else None
+
+    @property
+    def branch_code(self) -> int | None:
+        first = self._first()
+        return first.branch_code if first else None
+
+    @property
+    def claims(self) -> dict[str, Any]:
+        first = self._first()
+        return first.claims if first else {}
 
 
 def _to_int_or_none(value: Any) -> int | None:
@@ -136,6 +198,25 @@ def _normalize_module_codes(value: str | Sequence[str] | None) -> tuple[str, ...
             if code and code not in out:
                 out.append(code)
     return tuple(out)
+
+
+def _safe_date_string(raw: Any) -> str | None:
+    parsed = parse_date_or_none(raw)
+    return parsed.isoformat() if parsed else None
+
+
+def _normalize_public_license_status(record: dict[str, Any], license_to_date: str | None, cfg: IntegrationSettings) -> str:
+    license_payload = record.get("license") if isinstance(record.get("license"), dict) else {}
+    raw_status = (
+        str(license_payload.get("status") or record.get("state") or "").strip().lower() or None
+    )
+    if record.get("revoked_at"):
+        return "revoked"
+    if not bool(record.get("is_running")):
+        return "inactive"
+    if not is_license_current(license_to_date, True, cfg.license_extension_days):
+        return "expired"
+    return raw_status or "active"
 
 
 async def _resolve_entitlement_scope(
@@ -183,25 +264,39 @@ def _build_entitlement_context(
     scope: _ResolvedEntitlementScope,
     claims: ApiClientClaims,
     module_code: str,
+    cfg: IntegrationSettings,
 ) -> EntitlementContext:
     record_company_code = _to_int_or_none(record.get("company_code"))
     company = record.get("company") if isinstance(record.get("company"), dict) else {}
+    license_payload = record.get("license") if isinstance(record.get("license"), dict) else {}
+    license_to_date = _safe_date_string(
+        record.get("license_to_date")
+        or license_payload.get("expiration_date")
+        or license_payload.get("license_to_date")
+        or license_payload.get("to_date")
+    )
+    public_status = _normalize_public_license_status(record, license_to_date, cfg)
 
     return EntitlementContext(
+        module=module_code,
+        license=EntitlementLicenseContext(
+            expiration_date=license_to_date,
+            status=public_status,
+        ),
+        parameters=record.get("params") or {},
         company_id=str(record.get("company_id") or scope.company_id),
         company_code=record_company_code if record_company_code is not None else scope.company_code,
         company_name=company.get("name") if isinstance(company, dict) else claims.company_name,
-        module_code=module_code,
         infrastructure_domain=(record.get("domain") or scope.domain),
         infrastructure_serial_num=record.get("infrastructure_serial_num") or claims.infrastructure_serial_num,
         branch_code=scope.branch_code,
         matched_branch=_to_int_or_none(record.get("_matched_branch")),
         selected_branch=record.get("_selected_branch"),
         is_running=bool(record.get("is_running")),
-        license_to_date=record.get("license_to_date"),
-        state=record.get("state"),
+        license_to_date=license_to_date,
+        state=public_status,
         revoked_at=record.get("revoked_at"),
-        params=record.get("params") or {},
+        client_id=claims.client_id,
         claims=claims.raw,
     )
 
@@ -222,27 +317,8 @@ def _set_expiry_warning(request: Request, records: list[dict[str, Any]], cfg: In
         request.state.integration_message = f"License will expire in {warning_days_left} day(s)"
 
 
-def _build_entitlements_context(
-    *,
-    scope: _ResolvedEntitlementScope,
-    claims: ApiClientClaims,
-    records: list[dict[str, Any]],
-    entitlements: list[EntitlementContext],
-) -> EntitlementsContext:
-    first_record = records[0] if records else {}
-    company = first_record.get("company") if isinstance(first_record.get("company"), dict) else {}
-
-    return EntitlementsContext(
-        client_id=scope.client_id,
-        company_id=scope.company_id,
-        company_code=scope.company_code,
-        company_name=company.get("name") or claims.company_name,
-        infrastructure_domain=scope.domain,
-        infrastructure_serial_num=first_record.get("infrastructure_serial_num") or claims.infrastructure_serial_num,
-        branch_code=scope.branch_code,
-        entitlements=entitlements,
-        claims=claims.raw,
-    )
+def _build_entitlements_context(entitlements: list[EntitlementContext]) -> EntitlementsContext:
+    return EntitlementsContext(entitlements)
 
 
 async def _load_cached_entitlements(
@@ -329,7 +405,7 @@ async def _require_module_entitlement(
     if warning_message:
         request.state.integration_message = warning_message
 
-    return _build_entitlement_context(record, scope=scope, claims=claims, module_code=module_code)
+    return _build_entitlement_context(record, scope=scope, claims=claims, module_code=module_code, cfg=cfg)
 
 
 async def require_module_entitlement(
@@ -384,10 +460,11 @@ async def require_module_entitlements(
                 scope=scope,
                 claims=claims,
                 module_code=str(record_module_code),
+                cfg=cfg,
             )
         )
     _set_expiry_warning(request, records, cfg)
-    return _build_entitlements_context(scope=scope, claims=claims, records=records, entitlements=entitlements)
+    return _build_entitlements_context(entitlements)
 
 
 def require_module_entitlements_for(module_codes: str | Sequence[str]):
@@ -413,10 +490,11 @@ def require_module_entitlements_for(module_codes: str | Sequence[str]):
                     scope=scope,
                     claims=claims,
                     module_code=str(record_module_code),
+                    cfg=cfg,
                 )
             )
         _set_expiry_warning(request, records, cfg)
-        return _build_entitlements_context(scope=scope, claims=claims, records=records, entitlements=entitlements)
+        return _build_entitlements_context(entitlements)
 
     return _dep
 
