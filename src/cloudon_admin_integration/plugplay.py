@@ -2,7 +2,7 @@ from collections.abc import Sequence
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
 
 from cloudon_admin_integration.config import settings
@@ -19,8 +19,6 @@ from cloudon_admin_integration.dependencies import (
 from cloudon_admin_integration.sync_routes import sync_router
 from cloudon_admin_integration.responses import wire_response_envelope
 
-auth_router = APIRouter(tags=["Integration Auth"])
-
 
 class AuthTokenRequest(BaseModel):
     client_id: str
@@ -36,44 +34,44 @@ def _clean(value: str | None) -> str | None:
     return text or None
 
 
-@auth_router.post("/auth/token")
-@auth_router.post("/auth/token/")
-async def auth_token(
-    payload: AuthTokenRequest,
-    cache: IntegrationCache = Depends(get_cache),
-) -> dict[str, Any]:
-    client_id = _clean(payload.client_id)
-    client_secret = _clean(payload.client_secret)
-    if not client_id or not client_secret:
-        raise HTTPException(
-            status_code=422,
-            detail={"reason": "client_credentials_missing", "message": "client_id and client_secret are required"},
-        )
-    try:
-        return await bootstrap_and_cache_client(
-            client_id,
-            client_secret,
-            branch_code=_clean(payload.branch_code),
-            module_code=_clean(payload.module_code),
-            cache=cache,
-        )
-    except httpx.HTTPStatusError as exc:
-        detail = exc.response.text
+def _register_auth_routes(app: FastAPI) -> None:
+    @app.post("/auth/token")
+    @app.post("/auth/token/")
+    async def auth_token(
+        payload: AuthTokenRequest,
+        cache: IntegrationCache = Depends(get_cache),
+    ) -> dict[str, Any]:
+        client_id = _clean(payload.client_id)
+        client_secret = _clean(payload.client_secret)
+        if not client_id or not client_secret:
+            raise HTTPException(
+                status_code=422,
+                detail={"reason": "client_credentials_missing", "message": "client_id and client_secret are required"},
+            )
         try:
-            detail = exc.response.json()
-        except Exception:
-            pass
-        raise HTTPException(status_code=exc.response.status_code, detail=detail) from exc
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail={"reason": "admin_panel_unavailable", "message": str(exc)}) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail={"reason": "cache_unavailable", "message": str(exc)}) from exc
+            return await bootstrap_and_cache_client(
+                client_id,
+                client_secret,
+                branch_code=_clean(payload.branch_code),
+                module_code=_clean(payload.module_code),
+                cache=cache,
+            )
+        except httpx.HTTPStatusError as exc:
+            detail = exc.response.text
+            try:
+                detail = exc.response.json()
+            except Exception:
+                pass
+            raise HTTPException(status_code=exc.response.status_code, detail=detail) from exc
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail={"reason": "admin_panel_unavailable", "message": str(exc)}) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail={"reason": "cache_unavailable", "message": str(exc)}) from exc
 
 
 def wire_integration(
     app: FastAPI,
     *,
-    include_auth_routes: bool = True,
     include_sync_routes: bool = True,
     include_response_envelope: bool = True,
 ) -> None:
@@ -88,8 +86,7 @@ def wire_integration(
     async def _integration_shutdown() -> None:
         await shutdown_integration()
 
-    if include_auth_routes:
-        app.include_router(auth_router)
+    _register_auth_routes(app)
 
     if include_sync_routes:
         app.include_router(sync_router)
