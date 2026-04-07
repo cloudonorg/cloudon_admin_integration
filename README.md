@@ -62,6 +62,28 @@ from cloudon_admin_integration.dependencies import require_module_entitlement_fo
 Depends(require_module_entitlement_for("pharmacy_one"))
 ```
 
+To inspect every cached entitlement for the logged-in client/company:
+
+```python
+from fastapi import Depends
+from cloudon_admin_integration import require_module_entitlements
+from cloudon_admin_integration.dependencies import EntitlementsContext
+
+@app.get("/entitlements")
+async def entitlements(ctx: EntitlementsContext = Depends(require_module_entitlements)):
+    return [item.model_dump() for item in ctx.entitlements]
+```
+
+To scope that same bundle to one module:
+
+```python
+from cloudon_admin_integration import require_module_entitlements_for
+
+Depends(require_module_entitlements_for("pharmacy_one"))
+```
+
+The singular helpers still return one `EntitlementContext`; the plural helpers return an `EntitlementsContext` wrapper with an `entitlements` list.
+
 ## Runtime flow
 
 1. Integration authenticates against the admin panel using `client_id` + `client_secret`.

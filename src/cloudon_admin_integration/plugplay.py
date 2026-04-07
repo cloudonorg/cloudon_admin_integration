@@ -1,8 +1,13 @@
 from fastapi import Depends, FastAPI
 
 from cloudon_admin_integration.config import settings
-from cloudon_admin_integration.dependencies import require_module_entitlement_for
-from cloudon_admin_integration.dependencies import startup_integration, shutdown_integration
+from cloudon_admin_integration.dependencies import (
+    require_module_entitlement_for,
+    require_module_entitlements,
+    require_module_entitlements_for,
+    startup_integration,
+    shutdown_integration,
+)
 from cloudon_admin_integration.sync_routes import sync_router
 from cloudon_admin_integration.responses import wire_response_envelope
 
@@ -30,3 +35,9 @@ def wire_integration(
 
 def entitlement_dependency(module_code: str):
     return Depends(require_module_entitlement_for(module_code))
+
+
+def entitlements_dependency(module_code: str | None = None):
+    if module_code is None:
+        return Depends(require_module_entitlements)
+    return Depends(require_module_entitlements_for(module_code))

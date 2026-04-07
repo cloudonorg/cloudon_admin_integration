@@ -1,4 +1,5 @@
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -15,6 +16,16 @@ logger = logging.getLogger(__name__)
 
 _cache = IntegrationCache(settings)
 _admin_client = AdminPanelClient(settings)
+
+
+@dataclass(frozen=True)
+class _ResolvedEntitlementScope:
+    client_id: str | None
+    company_id: str
+    company_code: int
+    domain: str
+    branch_code: int | None
+    session: dict[str, Any] | None
 
 
 def get_settings() -> IntegrationSettings:
@@ -47,6 +58,18 @@ class EntitlementContext(BaseModel):
     claims: dict[str, Any] = Field(default_factory=dict)
 
 
+class EntitlementsContext(BaseModel):
+    client_id: str | None = None
+    company_id: str
+    company_code: int | None = None
+    company_name: str | None = None
+    infrastructure_domain: str | None = None
+    infrastructure_serial_num: str | None = None
+    branch_code: int | None = None
+    entitlements: list[EntitlementContext] = Field(default_factory=list)
+    claims: dict[str, Any] = Field(default_factory=dict)
+
+
 def _to_int_or_none(value: Any) -> int | None:
     if value is None:
         return None
@@ -63,24 +86,11 @@ def _fail(status_code: int, reason: str, message: str) -> None:
     raise HTTPException(status_code=status_code, detail={"reason": reason, "message": message})
 
 
-async def require_sync_key(
-    x_sync_key: str | None = Header(default=None, alias="X-Sync-Key"),
-    cfg: IntegrationSettings = Depends(get_settings),
-) -> None:
-    if not cfg.sync_key:
-        _fail(500, "sync_key_missing", "SYNC_KEY is not configured")
-    if x_sync_key != cfg.sync_key:
-        _fail(401, "sync_key_invalid", "Invalid X-Sync-Key")
-
-
-async def _require_module_entitlement(
+async def _resolve_entitlement_scope(
     request: Request,
-    *,
-    module_code: str,
     claims: ApiClientClaims,
     cache: IntegrationCache,
-    cfg: IntegrationSettings,
-) -> EntitlementContext:
+) -> _ResolvedEntitlementScope:
     header_domain = (request.headers.get("X-Infrastructure-Domain") or request.headers.get("X-Domain") or "").strip() or None
     header_company_code = _to_int_or_none(request.headers.get("X-Company-Code"))
     header_company_id = (request.headers.get("X-Company-Id") or "").strip() or None
@@ -105,17 +115,140 @@ async def _require_module_entitlement(
     if not domain:
         _fail(403, "domain_missing", "Could not resolve infrastructure domain from token/session/header")
 
+    return _ResolvedEntitlementScope(
+        client_id=claims.client_id,
+        company_id=company_id,
+        company_code=company_code,
+        domain=domain,
+        branch_code=header_branch_code if header_branch_code is not None else claims.branch_code,
+        session=session,
+    )
+
+
+def _build_entitlement_context(
+    record: dict[str, Any],
+    *,
+    scope: _ResolvedEntitlementScope,
+    claims: ApiClientClaims,
+    module_code: str,
+) -> EntitlementContext:
+    record_company_code = _to_int_or_none(record.get("company_code"))
+    company = record.get("company") if isinstance(record.get("company"), dict) else {}
+
+    return EntitlementContext(
+        company_id=str(record.get("company_id") or scope.company_id),
+        company_code=record_company_code if record_company_code is not None else scope.company_code,
+        company_name=company.get("name") if isinstance(company, dict) else claims.company_name,
+        module_code=module_code,
+        infrastructure_domain=(record.get("domain") or scope.domain),
+        infrastructure_serial_num=record.get("infrastructure_serial_num") or claims.infrastructure_serial_num,
+        branch_code=scope.branch_code,
+        matched_branch=_to_int_or_none(record.get("_matched_branch")),
+        selected_branch=record.get("_selected_branch"),
+        is_running=bool(record.get("is_running")),
+        license_to_date=record.get("license_to_date"),
+        state=record.get("state"),
+        revoked_at=record.get("revoked_at"),
+        params=record.get("params") or {},
+        claims=claims.raw,
+    )
+
+
+def _set_expiry_warning(request: Request, records: list[dict[str, Any]], cfg: IntegrationSettings) -> None:
+    warning_days_left: int | None = None
+    for record in records:
+        if not record.get("is_running"):
+            continue
+        license_date = parse_date_or_none(record.get("license_to_date"))
+        if not license_date:
+            continue
+        days_left = (license_date - datetime.utcnow().date()).days
+        if 0 <= days_left <= cfg.license_expiry_warning_days:
+            warning_days_left = days_left if warning_days_left is None else min(warning_days_left, days_left)
+
+    if warning_days_left is not None:
+        request.state.integration_message = f"License will expire in {warning_days_left} day(s)"
+
+
+def _build_entitlements_context(
+    *,
+    scope: _ResolvedEntitlementScope,
+    claims: ApiClientClaims,
+    records: list[dict[str, Any]],
+    entitlements: list[EntitlementContext],
+) -> EntitlementsContext:
+    first_record = records[0] if records else {}
+    company = first_record.get("company") if isinstance(first_record.get("company"), dict) else {}
+
+    return EntitlementsContext(
+        client_id=scope.client_id,
+        company_id=scope.company_id,
+        company_code=scope.company_code,
+        company_name=company.get("name") or claims.company_name,
+        infrastructure_domain=scope.domain,
+        infrastructure_serial_num=first_record.get("infrastructure_serial_num") or claims.infrastructure_serial_num,
+        branch_code=scope.branch_code,
+        entitlements=entitlements,
+        claims=claims.raw,
+    )
+
+
+async def _load_cached_entitlements(
+    cache: IntegrationCache,
+    scope: _ResolvedEntitlementScope,
+    *,
+    module_code: str | None = None,
+) -> list[dict[str, Any]]:
+    try:
+        records = await cache.dump(
+            company_id=scope.company_id,
+            company_code=scope.company_code,
+            module_code=module_code,
+            branch_code=scope.branch_code,
+            domain=scope.domain,
+        )
+        if records or not scope.company_id:
+            return records
+        return await cache.dump(
+            company_code=scope.company_code,
+            module_code=module_code,
+            branch_code=scope.branch_code,
+            domain=scope.domain,
+        )
+    except RuntimeError as exc:
+        _fail(503, "cache_unavailable", str(exc))
+
+
+async def require_sync_key(
+    x_sync_key: str | None = Header(default=None, alias="X-Sync-Key"),
+    cfg: IntegrationSettings = Depends(get_settings),
+) -> None:
+    if not cfg.sync_key:
+        _fail(500, "sync_key_missing", "SYNC_KEY is not configured")
+    if x_sync_key != cfg.sync_key:
+        _fail(401, "sync_key_invalid", "Invalid X-Sync-Key")
+
+
+async def _require_module_entitlement(
+    request: Request,
+    *,
+    module_code: str,
+    claims: ApiClientClaims,
+    cache: IntegrationCache,
+    cfg: IntegrationSettings,
+) -> EntitlementContext:
+    scope = await _resolve_entitlement_scope(request, claims, cache)
+
     token_module = claims.module_code
     if token_module and token_module not in {module_code, "*"}:
         _fail(403, "token_module_mismatch", "Token is not valid for this module")
 
-    branch_code = header_branch_code if header_branch_code is not None else claims.branch_code
     try:
         record = await cache.get_entitlement(
-            domain=domain,
-            company_code=company_code,
+            domain=scope.domain,
+            company_code=scope.company_code,
             module_code=module_code,
-            branch_code=branch_code,
+            branch_code=scope.branch_code,
         )
     except RuntimeError as exc:
         _fail(503, "cache_unavailable", str(exc))
@@ -144,23 +277,7 @@ async def _require_module_entitlement(
     if warning_message:
         request.state.integration_message = warning_message
 
-    return EntitlementContext(
-        company_id=company_id,
-        company_code=_to_int_or_none(record.get("company_code")) or company_code,
-        company_name=(record.get("company") or {}).get("name") if isinstance(record.get("company"), dict) else claims.company_name,
-        module_code=module_code,
-        infrastructure_domain=(record.get("domain") or domain),
-        infrastructure_serial_num=record.get("infrastructure_serial_num") or claims.infrastructure_serial_num,
-        branch_code=branch_code,
-        matched_branch=_to_int_or_none(record.get("_matched_branch")),
-        selected_branch=record.get("_selected_branch"),
-        is_running=bool(record.get("is_running")),
-        license_to_date=record.get("license_to_date"),
-        state=record.get("state"),
-        revoked_at=record.get("revoked_at"),
-        params=record.get("params") or {},
-        claims=claims.raw,
-    )
+    return _build_entitlement_context(record, scope=scope, claims=claims, module_code=module_code)
 
 
 async def require_module_entitlement(
@@ -192,6 +309,59 @@ def require_module_entitlement_for(module_code: str):
             cache=cache,
             cfg=cfg,
         )
+
+    return _dep
+
+
+async def require_module_entitlements(
+    request: Request,
+    claims: ApiClientClaims = Depends(require_valid_api_client_token),
+    cache: IntegrationCache = Depends(get_cache),
+    cfg: IntegrationSettings = Depends(get_settings),
+) -> EntitlementsContext:
+    scope = await _resolve_entitlement_scope(request, claims, cache)
+    records = await _load_cached_entitlements(cache, scope)
+    entitlements: list[EntitlementContext] = []
+    for record in records:
+        record_module_code = record.get("module_code")
+        if not record_module_code:
+            continue
+        entitlements.append(
+            _build_entitlement_context(
+                record,
+                scope=scope,
+                claims=claims,
+                module_code=str(record_module_code),
+            )
+        )
+    _set_expiry_warning(request, records, cfg)
+    return _build_entitlements_context(scope=scope, claims=claims, records=records, entitlements=entitlements)
+
+
+def require_module_entitlements_for(module_code: str):
+    async def _dep(
+        request: Request,
+        claims: ApiClientClaims = Depends(require_valid_api_client_token),
+        cache: IntegrationCache = Depends(get_cache),
+        cfg: IntegrationSettings = Depends(get_settings),
+    ) -> EntitlementsContext:
+        scope = await _resolve_entitlement_scope(request, claims, cache)
+        records = await _load_cached_entitlements(cache, scope, module_code=module_code)
+        entitlements: list[EntitlementContext] = []
+        for record in records:
+            record_module_code = record.get("module_code") or module_code
+            if not record_module_code:
+                continue
+            entitlements.append(
+                _build_entitlement_context(
+                    record,
+                    scope=scope,
+                    claims=claims,
+                    module_code=str(record_module_code),
+                )
+            )
+        _set_expiry_warning(request, records, cfg)
+        return _build_entitlements_context(scope=scope, claims=claims, records=records, entitlements=entitlements)
 
     return _dep
 

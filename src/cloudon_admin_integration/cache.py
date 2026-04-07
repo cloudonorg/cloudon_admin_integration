@@ -295,7 +295,8 @@ class IntegrationCache:
         company_id: str | None = None,
         company_code: int | str | None = None,
         module_code: str | None = None,
-        branch_code: str | None = None,
+        branch_code: str | int | None = None,
+        domain: str | None = None,
     ) -> list[dict[str, Any]]:
         redis_conn = self._ensure()
         keys = sorted(await redis_conn.smembers(self._index_key))
@@ -303,6 +304,8 @@ class IntegrationCache:
         for key in keys:
             record = await self._get_record_by_key(key)
             if not record:
+                continue
+            if domain and str(record.get("domain") or record.get("infrastructure", {}).get("domain")) != str(domain):
                 continue
             if company_id and str(record.get("company_id")) != str(company_id):
                 continue

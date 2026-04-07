@@ -193,6 +193,7 @@ async def get_redis_data(
     company_code: int | None = Query(default=None),
     module_code: str | None = Query(default=None),
     branch_code: str | None = Query(default=None),
+    domain: str | None = Query(default=None),
     refresh: bool = Query(default=False),
     cache: IntegrationCache = Depends(get_cache),
 ):
@@ -209,6 +210,7 @@ async def get_redis_data(
             company_code=company_code,
             module_code=module_code,
             branch_code=branch_code,
+            domain=domain,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=f"Cache unavailable: {exc}") from exc
