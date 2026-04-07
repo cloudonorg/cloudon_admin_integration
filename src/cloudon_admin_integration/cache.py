@@ -47,14 +47,15 @@ class IntegrationCache:
         if value is None:
             return ()
         if isinstance(value, str):
-            items = (value,)
+            items = tuple(part.strip() for part in value.split(","))
         else:
             items = tuple(value)
         out: list[str] = []
         for item in items:
-            code = str(item).strip()
-            if code and code not in out:
-                out.append(code)
+            for chunk in str(item).split(","):
+                code = chunk.strip()
+                if code and code not in out:
+                    out.append(code)
         return tuple(out)
 
     def _key(self, domain: str | None, company_code: str | int | None, module_code: str) -> str:

@@ -41,7 +41,6 @@ class IntegrationSettings:
     admin_panel_jwt_audience: str | None
     enforce_token_module_match: bool
     license_extension_days: int
-    cache_all_modules: bool
     integration_wrap_responses: bool
     integration_excluded_paths: tuple[str, ...]
     require_module_params: bool
@@ -82,7 +81,6 @@ class IntegrationSettings:
             license_extension_days=int(
                 (os.getenv("ADMIN_PANEL_LICENSE_EXTENSION_DAYS") or os.getenv("LICENSE_EXTENSION_DAYS") or 0)
             ),
-            cache_all_modules=_as_bool(os.getenv("CACHE_ALL_MODULES"), True),
             integration_wrap_responses=_as_bool(os.getenv("INTEGRATION_WRAP_RESPONSES"), True),
             integration_excluded_paths=_as_csv(
                 os.getenv("INTEGRATION_EXCLUDED_PATHS"),
@@ -99,9 +97,11 @@ class IntegrationSettings:
     def jwt_verification_key(self) -> str:
         algorithm = self.admin_panel_jwt_algorithm.upper()
         if algorithm.startswith("HS"):
-            if not self.admin_panel_jwt_signing_key:
-                raise RuntimeError("ADMIN_PANEL_JWT_SIGNING_KEY is required for HS algorithms")
-            return self.admin_panel_jwt_signing_key
+            if self.admin_panel_jwt_signing_key:
+                return self.admin_panel_jwt_signing_key
+            if self.admin_panel_client_secret:
+                return self.admin_panel_client_secret
+            raise RuntimeError("ADMIN_PANEL_CLIENT_SECRET is required for HS JWT verification")
         if self.admin_panel_jwt_public_key:
             return self.admin_panel_jwt_public_key
         if self.admin_panel_jwt_signing_key:

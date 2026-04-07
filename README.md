@@ -39,6 +39,7 @@ wire_integration(app, include_response_envelope=False)
 
 Relevant env flags:
 - `ADMIN_PANEL_CLIENT_ID` / `ADMIN_PANEL_CLIENT_SECRET` are used to bootstrap the local entitlement cache from the admin panel.
+- By default, the returned API-client JWT is verified with `ADMIN_PANEL_CLIENT_SECRET`, so no separate JWT secret is required unless you override the signing strategy.
 - `ADMIN_PANEL_CLIENT_BOOTSTRAP_PATH=/api/client-auth/bootstrap/`
 - `REQUIRE_MODULE_PARAMS=true|false` (if true, empty params returns 403)
 - `LICENSE_EXPIRY_WARNING_DAYS=10` (adds success `message` when license is close to expiration)
@@ -96,7 +97,9 @@ If you want the smallest possible integration surface in an external FastAPI app
 3. Define either `APP_MODULE_CODE` or `APP_MODULE_CODES`.
 4. Use `require_module_entitlement` for a single protected module, or `require_module_entitlements` / `require_module_entitlements_for(...)` when you want the full bundle.
 
-The admin-panel URL, Redis, JWT, and bootstrap credentials are still runtime settings for the external API process, but they can live in shared deployment env/secrets rather than being hardcoded in the app itself.
+The admin-panel URL, Redis, and bootstrap credentials are still runtime settings for the external API process, but they can live in shared deployment env/secrets rather than being hardcoded in the app itself. If you keep the default HS256 flow, the client secret doubles as the JWT verification key.
+
+Webhook refreshes are simplest when they target `POST /sync-redis-data`. The legacy `/sync-single-license`, `/sync-single-param`, and `/sync-company-change` routes remain compatibility aliases and now perform a full cache refresh too.
 
 ## Runtime flow
 
