@@ -45,6 +45,7 @@ Relevant env flags:
 - `ADMIN_PANEL_CLIENT_ID` / `ADMIN_PANEL_CLIENT_SECRET` are used to bootstrap the local entitlement cache from the admin panel.
 - By default, the returned API-client JWT is verified with `ADMIN_PANEL_CLIENT_SECRET`, so no separate JWT secret is required unless you override the signing strategy.
 - `ADMIN_PANEL_CLIENT_BOOTSTRAP_PATH=/api/client-auth/bootstrap/`
+- `SYNC_KEY` must match the backend webhook secret so `POST /sync-redis-data` can accept cache refresh payloads.
 - `REQUIRE_MODULE_PARAMS=true|false` (if true, empty params returns 403)
 - `LICENSE_EXPIRY_WARNING_DAYS=10` (adds success `message` when license is close to expiration)
 - `APP_MODULE_CODES=pharmacy_one,rapid_test` is the preferred module allow-list. It can contain one value or many values.
