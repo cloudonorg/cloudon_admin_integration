@@ -43,6 +43,11 @@ def _to_int_or_none(value: Any) -> int | None:
         return None
 
 
+def _allowed_module_codes() -> set[str]:
+    codes = settings.app_module_codes or (settings.app_module_code,)
+    return {code for code in codes if code}
+
+
 async def require_valid_api_client_token(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> ApiClientClaims:
@@ -77,12 +82,14 @@ async def require_valid_api_client_token(
         _fail(401, "token_company_missing", "Token missing company_code")
 
     token_module_code = (decoded.get("module_code") or "").strip() or None
+    allowed_module_codes = _allowed_module_codes()
     if (
         settings.enforce_token_module_match
         and token_module_code
-        and token_module_code not in {settings.app_module_code, "*"}
+        and token_module_code not in allowed_module_codes
+        and token_module_code != "*"
     ):
-        _fail(403, "token_module_mismatch", "Token module_code does not match this middleware module")
+        _fail(403, "token_module_mismatch", "Token module_code does not match this middleware module set")
 
     return ApiClientClaims(
         token_type=token_type,

@@ -57,6 +57,10 @@ class AdminPanelClient:
     def __init__(self, cfg: IntegrationSettings):
         self.cfg = cfg
 
+    def _allowed_module_codes(self) -> set[str]:
+        codes = self.cfg.app_module_codes or (self.cfg.app_module_code,)
+        return {code for code in codes if code}
+
     async def _request_json(
         self,
         method: str,
@@ -106,11 +110,12 @@ class AdminPanelClient:
         infrastructure_id = _norm(infrastructure.get("id") or payload.get("infrastructure_id"))
 
         records: list[dict[str, Any]] = []
+        allowed_module_codes = self._allowed_module_codes()
         for item in modules:
             module_code = _norm(item.get("module") or item.get("module_code"))
             if not module_code:
                 continue
-            if (not self.cfg.cache_all_modules) and module_code != self.cfg.app_module_code:
+            if (not self.cfg.cache_all_modules) and module_code not in allowed_module_codes:
                 continue
 
             license_payload = item.get("license") if isinstance(item.get("license"), dict) else {}

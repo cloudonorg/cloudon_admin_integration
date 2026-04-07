@@ -42,6 +42,8 @@ Relevant env flags:
 - `ADMIN_PANEL_CLIENT_BOOTSTRAP_PATH=/api/client-auth/bootstrap/`
 - `REQUIRE_MODULE_PARAMS=true|false` (if true, empty params returns 403)
 - `LICENSE_EXPIRY_WARNING_DAYS=10` (adds success `message` when license is close to expiration)
+- `APP_MODULE_CODE=pharmacy_one` remains the primary module for backward-compatible single-module apps.
+- `APP_MODULE_CODES=pharmacy_one,rapid_test` is optional and becomes the authoritative allow-list for multi-module token matching and bootstrap caching.
 
 ## Protect endpoint
 
@@ -74,15 +76,27 @@ async def entitlements(ctx: EntitlementsContext = Depends(require_module_entitle
     return [item.model_dump() for item in ctx.entitlements]
 ```
 
-To scope that same bundle to one module:
+To scope that same bundle to one or more modules:
 
 ```python
 from cloudon_admin_integration import require_module_entitlements_for
+from cloudon_admin_integration.config import settings
 
-Depends(require_module_entitlements_for("pharmacy_one"))
+Depends(require_module_entitlements_for(settings.app_module_codes))
 ```
 
-The singular helpers still return one `EntitlementContext`; the plural helpers return an `EntitlementsContext` wrapper with an `entitlements` list.
+The singular helpers still return one `EntitlementContext`. The plural helpers return an `EntitlementsContext` wrapper with an `entitlements` list and accept no module filter, one module code, or multiple module codes.
+
+## Minimal external API setup
+
+If you want the smallest possible integration surface in an external FastAPI app:
+
+1. Keep the package install.
+2. Add `wire_integration(app)`.
+3. Define either `APP_MODULE_CODE` or `APP_MODULE_CODES`.
+4. Use `require_module_entitlement` for a single protected module, or `require_module_entitlements` / `require_module_entitlements_for(...)` when you want the full bundle.
+
+The admin-panel URL, Redis, JWT, and bootstrap credentials are still runtime settings for the external API process, but they can live in shared deployment env/secrets rather than being hardcoded in the app itself.
 
 ## Runtime flow
 

@@ -1,3 +1,5 @@
+from collections.abc import Sequence
+
 from fastapi import Depends, FastAPI
 
 from cloudon_admin_integration.config import settings
@@ -37,7 +39,7 @@ def entitlement_dependency(module_code: str):
     return Depends(require_module_entitlement_for(module_code))
 
 
-def entitlements_dependency(module_code: str | None = None):
-    if module_code is None:
+def entitlements_dependency(module_codes: str | Sequence[str] | None = None):
+    if module_codes is None:
         return Depends(require_module_entitlements)
-    return Depends(require_module_entitlements_for(module_code))
+    return Depends(require_module_entitlements_for(module_codes))

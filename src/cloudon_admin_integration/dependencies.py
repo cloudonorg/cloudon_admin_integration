@@ -1,6 +1,7 @@
 import logging
 from dataclasses import dataclass
 from datetime import datetime
+from collections.abc import Sequence
 from typing import Any
 
 import httpx
@@ -84,6 +85,21 @@ def _to_int_or_none(value: Any) -> int | None:
 
 def _fail(status_code: int, reason: str, message: str) -> None:
     raise HTTPException(status_code=status_code, detail={"reason": reason, "message": message})
+
+
+def _normalize_module_codes(value: str | Sequence[str] | None) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        items = (value,)
+    else:
+        items = tuple(value)
+    out: list[str] = []
+    for item in items:
+        code = str(item).strip()
+        if code and code not in out:
+            out.append(code)
+    return tuple(out)
 
 
 async def _resolve_entitlement_scope(
@@ -197,13 +213,13 @@ async def _load_cached_entitlements(
     cache: IntegrationCache,
     scope: _ResolvedEntitlementScope,
     *,
-    module_code: str | None = None,
+    module_codes: str | Sequence[str] | None = None,
 ) -> list[dict[str, Any]]:
     try:
         records = await cache.dump(
             company_id=scope.company_id,
             company_code=scope.company_code,
-            module_code=module_code,
+            module_code=module_codes,
             branch_code=scope.branch_code,
             domain=scope.domain,
         )
@@ -211,7 +227,7 @@ async def _load_cached_entitlements(
             return records
         return await cache.dump(
             company_code=scope.company_code,
-            module_code=module_code,
+            module_code=module_codes,
             branch_code=scope.branch_code,
             domain=scope.domain,
         )
@@ -338,18 +354,21 @@ async def require_module_entitlements(
     return _build_entitlements_context(scope=scope, claims=claims, records=records, entitlements=entitlements)
 
 
-def require_module_entitlements_for(module_code: str):
+def require_module_entitlements_for(module_codes: str | Sequence[str]):
     async def _dep(
         request: Request,
         claims: ApiClientClaims = Depends(require_valid_api_client_token),
         cache: IntegrationCache = Depends(get_cache),
         cfg: IntegrationSettings = Depends(get_settings),
     ) -> EntitlementsContext:
+        normalized_module_codes = _normalize_module_codes(module_codes)
+        if not normalized_module_codes:
+            _fail(500, "module_codes_missing", "At least one module code is required")
         scope = await _resolve_entitlement_scope(request, claims, cache)
-        records = await _load_cached_entitlements(cache, scope, module_code=module_code)
+        records = await _load_cached_entitlements(cache, scope, module_codes=normalized_module_codes)
         entitlements: list[EntitlementContext] = []
         for record in records:
-            record_module_code = record.get("module_code") or module_code
+            record_module_code = record.get("module_code") or normalized_module_codes[0]
             if not record_module_code:
                 continue
             entitlements.append(
@@ -386,6 +405,7 @@ async def perform_full_sync(
         "records": len(records),
         "rebuild": rebuild_info,
         "module_code": settings.app_module_code,
+        "module_codes": settings.app_module_codes,
     }
 
 

@@ -15,9 +15,14 @@ def _as_csv(value: str | None, default: tuple[str, ...]) -> tuple[str, ...]:
     return parts or default
 
 
+def _dedupe(values: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(value for value in values if value))
+
+
 @dataclass(frozen=True)
 class IntegrationSettings:
     app_module_code: str
+    app_module_codes: tuple[str, ...]
     admin_panel_base_url: str
     admin_panel_client_bootstrap_path: str
     admin_panel_client_id: str | None
@@ -45,8 +50,16 @@ class IntegrationSettings:
     @classmethod
     def from_env(cls) -> "IntegrationSettings":
         base_url = (os.getenv("DJANGO_API_URL") or "").strip().rstrip("/")
+        raw_module_code = (os.getenv("APP_MODULE_CODE") or "").strip() or None
+        module_codes = _dedupe(_as_csv(os.getenv("APP_MODULE_CODES"), ()))
+        if not module_codes:
+            module_code = raw_module_code or "pharmacy_one"
+            module_codes = (module_code,)
+        else:
+            module_code = raw_module_code if raw_module_code in module_codes else module_codes[0]
         return cls(
-            app_module_code=(os.getenv("APP_MODULE_CODE") or "pharmacy_one").strip(),
+            app_module_code=module_code or module_codes[0],
+            app_module_codes=module_codes,
             admin_panel_base_url=base_url,
             admin_panel_client_bootstrap_path=(
                 os.getenv("ADMIN_PANEL_CLIENT_BOOTSTRAP_PATH") or "/api/client-auth/bootstrap/"

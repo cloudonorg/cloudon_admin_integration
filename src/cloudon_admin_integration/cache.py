@@ -1,6 +1,7 @@
 import copy
 import json
 from datetime import date, datetime, timedelta
+from collections.abc import Sequence
 from typing import Any
 
 import redis.asyncio as redis
@@ -40,6 +41,21 @@ class IntegrationCache:
         if not text:
             return default
         return text
+
+    @staticmethod
+    def _normalize_codes(value: str | Sequence[str] | None) -> tuple[str, ...]:
+        if value is None:
+            return ()
+        if isinstance(value, str):
+            items = (value,)
+        else:
+            items = tuple(value)
+        out: list[str] = []
+        for item in items:
+            code = str(item).strip()
+            if code and code not in out:
+                out.append(code)
+        return tuple(out)
 
     def _key(self, domain: str | None, company_code: str | int | None, module_code: str) -> str:
         norm_domain = self._norm_code(domain, default="unknown") or "unknown"
@@ -294,12 +310,14 @@ class IntegrationCache:
         self,
         company_id: str | None = None,
         company_code: int | str | None = None,
-        module_code: str | None = None,
+        module_code: str | Sequence[str] | None = None,
         branch_code: str | int | None = None,
         domain: str | None = None,
     ) -> list[dict[str, Any]]:
         redis_conn = self._ensure()
         keys = sorted(await redis_conn.smembers(self._index_key))
+        module_codes = self._normalize_codes(module_code)
+        module_code_set = set(module_codes)
         out: list[dict[str, Any]] = []
         for key in keys:
             record = await self._get_record_by_key(key)
@@ -311,7 +329,7 @@ class IntegrationCache:
                 continue
             if company_code is not None and str(record.get("company_code")) != str(company_code):
                 continue
-            if module_code and record.get("module_code") != module_code:
+            if module_code_set and record.get("module_code") not in module_code_set:
                 continue
             if branch_code is not None:
                 params = record.get("params") or {}
