@@ -219,6 +219,11 @@ def _normalize_public_license_status(record: dict[str, Any], license_to_date: st
     return raw_status or "active"
 
 
+def _license_warning_message(days_left: int) -> str:
+    suffix = "s" if days_left != 1 else ""
+    return f"License about to expire in {days_left} day{suffix}"
+
+
 async def _resolve_entitlement_scope(
     request: Request,
     claims: ApiClientClaims,
@@ -314,7 +319,7 @@ def _set_expiry_warning(request: Request, records: list[dict[str, Any]], cfg: In
             warning_days_left = days_left if warning_days_left is None else min(warning_days_left, days_left)
 
     if warning_days_left is not None:
-        request.state.integration_message = f"License will expire in {warning_days_left} day(s)"
+        request.state.integration_message = _license_warning_message(warning_days_left)
 
 
 def _build_entitlements_context(entitlements: list[EntitlementContext]) -> EntitlementsContext:
@@ -401,7 +406,7 @@ async def _require_module_entitlement(
     if license_date:
         days_left = (license_date - datetime.utcnow().date()).days
         if 0 <= days_left <= cfg.license_expiry_warning_days:
-            warning_message = f"License will expire in {days_left} day(s)"
+            warning_message = _license_warning_message(days_left)
     if warning_message:
         request.state.integration_message = warning_message
 
@@ -458,6 +463,40 @@ async def require_module_entitlements(
             _build_entitlement_context(
                 record,
                 scope=scope,
+                claims=claims,
+                module_code=str(record_module_code),
+                cfg=cfg,
+            )
+        )
+    _set_expiry_warning(request, records, cfg)
+    return _build_entitlements_context(entitlements)
+
+
+async def require_all_module_entitlements(
+    request: Request,
+    claims: ApiClientClaims = Depends(require_valid_api_client_token),
+    cache: IntegrationCache = Depends(get_cache),
+    cfg: IntegrationSettings = Depends(get_settings),
+) -> EntitlementsContext:
+    scope = await _resolve_entitlement_scope(request, claims, cache)
+    all_scope = _ResolvedEntitlementScope(
+        client_id=scope.client_id,
+        company_id=scope.company_id,
+        company_code=scope.company_code,
+        domain=scope.domain,
+        branch_code=None,
+        session=scope.session,
+    )
+    records = await _load_cached_entitlements(cache, all_scope)
+    entitlements: list[EntitlementContext] = []
+    for record in records:
+        record_module_code = record.get("module_code")
+        if not record_module_code:
+            continue
+        entitlements.append(
+            _build_entitlement_context(
+                record,
+                scope=all_scope,
                 claims=claims,
                 module_code=str(record_module_code),
                 cfg=cfg,

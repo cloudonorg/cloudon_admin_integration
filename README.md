@@ -2,6 +2,7 @@
 
 Reusable FastAPI integration for CloudOn Admin Panel:
 - Public `/auth/token` bootstrap endpoint for external APIs
+- Cached `/admin/parameters` bundle endpoint for app code and debugging
 - Bearer JWT validation (`api_client` tokens)
 - Redis-cached entitlement checks (module license/parameters)
 - Bootstrap + sync routes for license/params/company refresh
@@ -28,9 +29,11 @@ wire_integration(app)
   "success": true,
   "error": null,
   "message": null,
-  "data": {}
+  "data": null
 }
 ```
+
+Errors use the same envelope shape with `message: null` and `data: null`.
 
 Disable if needed:
 
@@ -70,15 +73,15 @@ from cloudon_admin_integration.dependencies import require_module_entitlement_fo
 Depends(require_module_entitlement_for("pharmacy_one"))
 ```
 
-To inspect every cached entitlement for the logged-in client/company:
+To inspect the full cached bundle for the logged-in client/company:
 
 ```python
 from fastapi import Depends
-from cloudon_admin_integration import require_module_entitlements
+from cloudon_admin_integration import require_all_module_entitlements
 from cloudon_admin_integration.dependencies import EntitlementsContext
 
-@app.get("/entitlements")
-async def entitlements(ctx: EntitlementsContext = Depends(require_module_entitlements)):
+@app.get("/admin/parameters")
+async def admin_parameters(ctx: EntitlementsContext = Depends(require_all_module_entitlements)):
     return ctx.model_dump()
 ```
 
@@ -106,6 +109,8 @@ The singular helpers still return one `EntitlementContext`, but its public dump 
 
 The plural helpers return an `EntitlementsContext` list-like root model, so `ctx.model_dump()` yields a plain list of the same module objects.
 
+`require_module_entitlements(...)` stays branch-aware, while `require_all_module_entitlements` and `GET /admin/parameters` ignore any branch selector and return the full company bundle.
+
 ## Minimal external API setup
 
 If you want the smallest possible integration surface in an external FastAPI app:
@@ -115,6 +120,7 @@ If you want the smallest possible integration surface in an external FastAPI app
 3. Define either `APP_MODULE_CODE` or `APP_MODULE_CODES`.
 4. Use `require_module_entitlement` for a single protected module, or `require_module_entitlements` / `require_module_entitlements_for(...)` when you want the full bundle.
 5. Call `POST /auth/token` on the external API to bootstrap and cache the client's full entitlement bundle.
+6. Call `GET /admin/parameters` to inspect the full local cached bundle in the same compact shape.
 
 The admin-panel URL, Redis, and bootstrap credentials are still runtime settings for the external API process, but they can live in shared deployment env/secrets rather than being hardcoded in the app itself. If you keep the default HS256 flow, the client secret doubles as the JWT verification key.
 

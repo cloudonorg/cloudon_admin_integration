@@ -9,7 +9,9 @@ from cloudon_admin_integration.config import settings
 from cloudon_admin_integration.cache import IntegrationCache
 from cloudon_admin_integration.dependencies import (
     bootstrap_and_cache_client,
+    EntitlementsContext,
     get_cache,
+    require_all_module_entitlements,
     require_module_entitlement_for,
     require_module_entitlements,
     require_module_entitlements_for,
@@ -69,6 +71,15 @@ def _register_auth_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=503, detail={"reason": "cache_unavailable", "message": str(exc)}) from exc
 
 
+def _register_admin_routes(app: FastAPI) -> None:
+    @app.get("/admin/parameters")
+    @app.get("/admin/parameters/")
+    async def admin_parameters(
+        ctx: EntitlementsContext = Depends(require_all_module_entitlements),
+    ) -> list[dict[str, Any]]:
+        return ctx.model_dump()
+
+
 def wire_integration(
     app: FastAPI,
     *,
@@ -87,6 +98,7 @@ def wire_integration(
         await shutdown_integration()
 
     _register_auth_routes(app)
+    _register_admin_routes(app)
 
     if include_sync_routes:
         app.include_router(sync_router)
