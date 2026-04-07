@@ -78,13 +78,28 @@ class AdminPanelClient:
             response.raise_for_status()
             return response.json()
 
-    async def bootstrap_client_bundle(self) -> dict[str, Any]:
-        if not self.cfg.admin_panel_client_id or not self.cfg.admin_panel_client_secret:
-            raise httpx.HTTPError("ADMIN_PANEL_CLIENT_ID and ADMIN_PANEL_CLIENT_SECRET are required for bootstrap")
+    async def bootstrap_client_bundle(
+        self,
+        client_id: str | None = None,
+        client_secret: str | None = None,
+        *,
+        branch_code: str | None = None,
+        module_code: str | None = None,
+    ) -> dict[str, Any]:
+        client_id = (client_id or self.cfg.admin_panel_client_id or "").strip() or None
+        client_secret = (client_secret or self.cfg.admin_panel_client_secret or "").strip() or None
+        if not client_id or not client_secret:
+            raise httpx.HTTPError("client_id and client_secret are required for bootstrap")
         payload = {
-            "client_id": self.cfg.admin_panel_client_id,
-            "client_secret": self.cfg.admin_panel_client_secret,
+            "client_id": client_id,
+            "client_secret": client_secret,
         }
+        branch_value = _norm(branch_code)
+        module_value = _norm(module_code)
+        if branch_value:
+            payload["branch_code"] = branch_value
+        if module_value:
+            payload["module_code"] = module_value
         data = await self._request_json(
             "POST",
             self.cfg.admin_panel_client_bootstrap_path,

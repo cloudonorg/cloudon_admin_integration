@@ -1,3 +1,4 @@
+from cloudon_admin_integration.auth_routes import auth_router
 from cloudon_admin_integration.dependencies import (
     EntitlementContext,
     EntitlementsContext,
@@ -18,6 +19,7 @@ from cloudon_admin_integration.sync_routes import sync_router
 __all__ = [
     "EntitlementContext",
     "EntitlementsContext",
+    "auth_router",
     "get_cache",
     "get_settings",
     "entitlement_dependency",

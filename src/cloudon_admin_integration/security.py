@@ -48,6 +48,44 @@ def _allowed_module_codes() -> set[str]:
     return {code for code in codes if code}
 
 
+def _peek_unverified_claims(token: str) -> dict[str, Any] | None:
+    try:
+        decoded = jwt.decode(
+            token,
+            options={"verify_signature": False, "verify_exp": False, "verify_aud": False},
+            algorithms=[settings.admin_panel_jwt_algorithm],
+        )
+    except jwt.InvalidTokenError:
+        return None
+    return decoded if isinstance(decoded, dict) else None
+
+
+async def _resolve_verification_key(token: str) -> str:
+    unverified = _peek_unverified_claims(token) or {}
+    client_id = (unverified.get("client_id") or "").strip() or None
+    cache_error: RuntimeError | None = None
+
+    if client_id:
+        try:
+            from cloudon_admin_integration.dependencies import get_cache
+
+            session = await get_cache().get_client_session(client_id)
+        except RuntimeError as exc:
+            cache_error = exc
+        else:
+            if isinstance(session, dict):
+                verification_key = (session.get("verification_key") or session.get("client_secret") or "").strip()
+                if verification_key:
+                    return verification_key
+
+    try:
+        return settings.jwt_verification_key()
+    except RuntimeError as exc:
+        if cache_error is not None:
+            _fail(503, "cache_unavailable", str(cache_error))
+        raise exc
+
+
 async def require_valid_api_client_token(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> ApiClientClaims:
@@ -59,9 +97,14 @@ async def require_valid_api_client_token(
 
     token = credentials.credentials
     try:
+        verification_key = await _resolve_verification_key(token)
+    except RuntimeError as exc:
+        _fail(500, "token_verification_unavailable", str(exc))
+
+    try:
         decoded = jwt.decode(
             token,
-            settings.jwt_verification_key(),
+            verification_key,
             algorithms=[settings.admin_panel_jwt_algorithm],
             audience=settings.admin_panel_jwt_audience,
             options={"verify_aud": bool(settings.admin_panel_jwt_audience)},

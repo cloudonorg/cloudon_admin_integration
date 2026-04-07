@@ -1,6 +1,7 @@
 # cloudon-admin-integration
 
 Reusable FastAPI integration for CloudOn Admin Panel:
+- Public `/auth/token` bootstrap endpoint for external APIs
 - Bearer JWT validation (`api_client` tokens)
 - Redis-cached entitlement checks (company/module)
 - Bootstrap + sync routes for license/params/company refresh
@@ -20,7 +21,7 @@ from cloudon_admin_integration import wire_integration
 wire_integration(app)
 ```
 
-`wire_integration(app)` also wires global response/error formatting by default:
+`wire_integration(app)` also wires the public `/auth/token` route and global response/error formatting by default:
 
 ```json
 {
@@ -96,6 +97,7 @@ If you want the smallest possible integration surface in an external FastAPI app
 2. Add `wire_integration(app)`.
 3. Define either `APP_MODULE_CODE` or `APP_MODULE_CODES`.
 4. Use `require_module_entitlement` for a single protected module, or `require_module_entitlements` / `require_module_entitlements_for(...)` when you want the full bundle.
+5. Call `POST /auth/token` on the external API to bootstrap and cache the client's full entitlement bundle.
 
 The admin-panel URL, Redis, and bootstrap credentials are still runtime settings for the external API process, but they can live in shared deployment env/secrets rather than being hardcoded in the app itself. If you keep the default HS256 flow, the client secret doubles as the JWT verification key.
 

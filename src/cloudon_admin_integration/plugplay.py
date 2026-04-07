@@ -2,6 +2,7 @@ from collections.abc import Sequence
 
 from fastapi import Depends, FastAPI
 
+from cloudon_admin_integration.auth_routes import auth_router
 from cloudon_admin_integration.config import settings
 from cloudon_admin_integration.dependencies import (
     require_module_entitlement_for,
@@ -17,6 +18,7 @@ from cloudon_admin_integration.responses import wire_response_envelope
 def wire_integration(
     app: FastAPI,
     *,
+    include_auth_routes: bool = True,
     include_sync_routes: bool = True,
     include_response_envelope: bool = True,
 ) -> None:
@@ -30,6 +32,9 @@ def wire_integration(
     @app.on_event("shutdown")
     async def _integration_shutdown() -> None:
         await shutdown_integration()
+
+    if include_auth_routes:
+        app.include_router(auth_router)
 
     if include_sync_routes:
         app.include_router(sync_router)

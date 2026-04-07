@@ -41,6 +41,41 @@ def get_admin_client() -> AdminPanelClient:
     return _admin_client
 
 
+async def bootstrap_and_cache_client(
+    client_id: str,
+    client_secret: str,
+    *,
+    branch_code: str | None = None,
+    module_code: str | None = None,
+    cache: IntegrationCache | None = None,
+    admin_client: AdminPanelClient | None = None,
+) -> dict[str, Any]:
+    cache_client = cache or _cache
+    api_client = admin_client or _admin_client
+
+    payload = await api_client.bootstrap_client_bundle(
+        client_id=client_id,
+        client_secret=client_secret,
+        branch_code=branch_code,
+        module_code=module_code,
+    )
+    records, client_session = api_client.normalize_bootstrap_bundle(payload)
+
+    client_session["client_secret"] = client_secret
+    client_session["verification_key"] = client_secret
+    now = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    for record in records:
+        record["updated_at"] = now
+        record["source"] = "bootstrap"
+
+    rebuild_info = await cache_client.rebuild(records, client_session=client_session)
+
+    response = dict(payload)
+    response["cache"] = rebuild_info
+    response["records"] = len(records)
+    return response
+
+
 class EntitlementContext(BaseModel):
     company_id: str
     company_code: int | None = None
@@ -392,19 +427,18 @@ async def perform_full_sync(
 ) -> dict[str, Any]:
     cache_client = cache or _cache
     api_client = admin_client or _admin_client
+    if not settings.admin_panel_client_id or not settings.admin_panel_client_secret:
+        raise httpx.HTTPError("ADMIN_PANEL_CLIENT_ID and ADMIN_PANEL_CLIENT_SECRET are required for bootstrap")
 
-    payload = await api_client.bootstrap_client_bundle()
-    records, client_session = api_client.normalize_bootstrap_bundle(payload)
-
-    now = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
-    for record in records:
-        record["updated_at"] = now
-        record["source"] = "bootstrap"
-
-    rebuild_info = await cache_client.rebuild(records, client_session=client_session)
+    payload = await bootstrap_and_cache_client(
+        settings.admin_panel_client_id,
+        settings.admin_panel_client_secret,
+        cache=cache_client,
+        admin_client=api_client,
+    )
     return {
-        "records": len(records),
-        "rebuild": rebuild_info,
+        "records": payload["records"],
+        "rebuild": payload["cache"],
         "module_code": settings.app_module_code,
         "module_codes": settings.app_module_codes,
     }
