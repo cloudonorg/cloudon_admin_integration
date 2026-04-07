@@ -47,8 +47,8 @@ Relevant env flags:
 - `ADMIN_PANEL_CLIENT_BOOTSTRAP_PATH=/api/client-auth/bootstrap/`
 - `REQUIRE_MODULE_PARAMS=true|false` (if true, empty params returns 403)
 - `LICENSE_EXPIRY_WARNING_DAYS=10` (adds success `message` when license is close to expiration)
-- `APP_MODULE_CODE=pharmacy_one` remains the primary module for backward-compatible single-module apps.
-- `APP_MODULE_CODES=pharmacy_one,rapid_test` is optional and becomes the authoritative allow-list for multi-module token matching and bootstrap caching.
+- `APP_MODULE_CODES=pharmacy_one,rapid_test` is the preferred module allow-list. It can contain one value or many values.
+- `APP_MODULE_CODE=pharmacy_one` remains a backward-compatible fallback for older single-module deployments.
 
 ## Protect endpoint
 
@@ -71,6 +71,23 @@ For per-endpoint module checks:
 from cloudon_admin_integration.dependencies import require_module_entitlement_for
 
 Depends(require_module_entitlement_for("pharmacy_one"))
+```
+
+For params-only injection:
+
+```python
+from fastapi import Depends
+from cloudon_admin_integration import require_module_parameters, require_module_parameters_for
+
+@app.get("/test")
+async def test(
+    current_params: dict = Depends(require_module_parameters),
+    rapid_test_params: dict = Depends(require_module_parameters_for("rapid_test")),
+):
+    return {
+        "current_params": current_params,
+        "rapid_test_params": rapid_test_params,
+    }
 ```
 
 To inspect the full cached bundle for the logged-in client/company:

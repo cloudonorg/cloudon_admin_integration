@@ -446,6 +446,21 @@ def require_module_entitlement_for(module_code: str):
     return _dep
 
 
+async def require_module_parameters(
+    entitlement: EntitlementContext = Depends(require_module_entitlement),
+) -> dict[str, Any]:
+    return entitlement.parameters
+
+
+def require_module_parameters_for(module_code: str):
+    async def _dep(
+        entitlement: EntitlementContext = Depends(require_module_entitlement_for(module_code)),
+    ) -> dict[str, Any]:
+        return entitlement.parameters
+
+    return _dep
+
+
 async def require_module_entitlements(
     request: Request,
     claims: ApiClientClaims = Depends(require_valid_api_client_token),
