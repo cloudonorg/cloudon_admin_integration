@@ -1,9 +1,8 @@
-from typing import Any
 from collections.abc import Sequence
+from typing import Any
 
 import httpx
-from fastapi import Depends, FastAPI
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, HTTPException
 from pydantic import BaseModel
 
 from cloudon_admin_integration.config import settings
