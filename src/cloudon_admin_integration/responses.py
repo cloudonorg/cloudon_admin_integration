@@ -32,6 +32,9 @@ def _extract_error_and_message(detail: Any, fallback_message: str = "Request fai
 
 
 def normalize_response_payload(payload: Any, status_code: int, *, default_message: str | None = None) -> dict[str, Any]:
+    def _error_data(value: Any) -> Any:
+        return value if value is not None else []
+
     if isinstance(payload, dict):
         if "success" in payload:
             success = bool(payload.get("success"))
@@ -47,11 +50,14 @@ def normalize_response_payload(payload: Any, status_code: int, *, default_messag
                     error = payload.get("message")
             if success and not message:
                 message = default_message
+            data = payload.get("data")
+            if not success and data is None:
+                data = []
             return response_envelope(
                 success=success,
                 error=error,
                 message=message,
-                data=payload.get("data"),
+                data=data,
             )
 
         if status_code >= 400:
@@ -60,11 +66,11 @@ def normalize_response_payload(payload: Any, status_code: int, *, default_messag
                 success=False,
                 error=err,
                 message=msg,
-                data=payload.get("data"),
+                data=_error_data(payload.get("data")),
             )
 
     if status_code >= 400:
-        return response_envelope(success=False, error=payload, message="Request failed", data=None)
+        return response_envelope(success=False, error=payload, message="Request failed", data=[])
 
     return response_envelope(success=True, error=None, message=default_message, data=payload)
 
