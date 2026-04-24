@@ -1,203 +1,326 @@
 # cloudon-admin-integration
 
-Reusable FastAPI integration for CloudOn Admin Panel:
-- Public `/auth/token` bootstrap endpoint for external APIs
-- Cached `/admin/parameters` bundle endpoint for app code and debugging
-- Bearer JWT validation (`api_client` tokens)
-- Redis-cached entitlement checks (module license/parameters)
-- Bootstrap + sync routes for license/params/company refresh
-- Global API response envelope and exception normalization
+Reusable FastAPI integration layer for CloudOn Admin Panel.
+
+It provides:
+- external API `/auth/token`
+- local Redis cache of backend effective configs
+- bearer token validation for `api_client` tokens
+- dependency helpers for license and parameter checks
+- webhook notification routes for refresh/reconcile
+- consistent response envelope wiring
+
+## Architecture
+
+The admin backend is authoritative.
+
+This package treats Redis as a rebuildable local cache of normalized effective configuration.
+
+Runtime flow:
+1. external API receives `client_id` + `client_secret`
+2. package calls backend `POST /api/client-auth/bootstrap/`
+3. backend returns token plus `effective_configs`
+4. package stores those configs in Redis
+5. protected API endpoints read only from Redis
+6. backend notifications trigger refresh/reconcile, not direct state writes from webhook payloads
 
 ## Install
 
-```bash
-pip install "git+https://github.com/cloudonorg/cloudon_admin_integration.git"
+Add these dependencies to the external API:
+
+```txt
+git+https://github.com/cloudonorg/cloudon_admin_integration.git
+cryptography
 ```
 
-## Basic wiring
+`cryptography` is required for `RS256` token verification.
+
+## Minimal FastAPI Wiring
 
 ```python
-from cloudon_admin_integration import wire_integration
+from fastapi import Depends, FastAPI
+from cloudon_admin_integration import (
+    EntitlementContext,
+    EntitlementsContext,
+    require_module_entitlement,
+    require_module_entitlements_for,
+    require_module_parameters,
+    require_module_parameters_for,
+    wire_integration,
+)
+from cloudon_admin_integration.config import settings as integration_settings
 
+app = FastAPI()
 wire_integration(app)
-```
 
-`wire_integration(app)` also wires the public `/auth/token` route and global response/error formatting by default:
-
-```json
-{
-  "success": true,
-  "error": null,
-  "message": null,
-  "data": null
-}
-```
-
-Errors use the same envelope shape with `message: null` and `data: null`.
-
-Disable if needed:
-
-```python
-wire_integration(app, include_response_envelope=False)
-```
-
-Relevant env flags:
-- `ADMIN_PANEL_CLIENT_ID` / `ADMIN_PANEL_CLIENT_SECRET` are used to bootstrap the local entitlement cache from the admin panel.
-- By default, the returned API-client JWT is verified with `ADMIN_PANEL_CLIENT_SECRET`, so no separate JWT secret is required unless you override the signing strategy.
-- `ADMIN_PANEL_CLIENT_BOOTSTRAP_PATH=/api/client-auth/bootstrap/`
-- `SYNC_KEY` must match the backend webhook secret so `POST /sync-redis-data` can accept cache refresh payloads.
-- `REQUIRE_MODULE_PARAMS=true|false` (if true, empty params returns 403)
-- `LICENSE_EXPIRY_WARNING_DAYS=10` (adds success `message` when license is close to expiration)
-- `APP_MODULE_CODES=pharmacy_one,rapid_test` is the preferred module allow-list. It can contain one value or many values.
-- `APP_MODULE_CODE=pharmacy_one` remains a backward-compatible fallback for older single-module deployments.
-
-## Protect endpoint
-
-```python
-from fastapi import Depends
-from cloudon_admin_integration.dependencies import EntitlementContext, require_module_entitlement
-
-@app.get("/hello")
-async def hello(entitlement: EntitlementContext = Depends(require_module_entitlement)):
-    return {
-        "module": entitlement.module,
-        "license": entitlement.license.model_dump(),
-        "parameters": entitlement.parameters,
-    }
-```
-
-For per-endpoint module checks:
-
-```python
-from cloudon_admin_integration.dependencies import require_module_entitlement_for
-
-Depends(require_module_entitlement_for("pharmacy_one"))
-```
-
-For params-only injection:
-
-```python
-from fastapi import Depends
-from cloudon_admin_integration import require_module_parameters, require_module_parameters_for
-
-@app.get("/test")
-async def test(
+@app.get("/test/app-module-code")
+async def test_app_module_code(
+    entitlement: EntitlementContext = Depends(require_module_entitlement),
     current_params: dict = Depends(require_module_parameters),
-    rapid_test_params: dict = Depends(require_module_parameters_for("rapid_test")),
 ):
     return {
-        "current_params": current_params,
-        "rapid_test_params": rapid_test_params,
+        "app_module_code": integration_settings.app_module_code,
+        "module": entitlement.module,
+        "license": entitlement.license.model_dump(),
+        "current_parameters": current_params,
+    }
+
+@app.get("/test/app-module-codes")
+async def test_app_module_codes(
+    entitlements: EntitlementsContext = Depends(
+        require_module_entitlements_for(integration_settings.app_module_codes)
+    ),
+):
+    return entitlements.model_dump()
+
+@app.get("/test/hard-coded")
+async def test_hard_coded(
+    pharmacy_one_params: dict = Depends(require_module_parameters_for("pharmacy_one")),
+    update_items_params: dict = Depends(require_module_parameters_for("update_items")),
+    open_cart_params: dict = Depends(require_module_parameters_for("open_cart")),
+):
+    return {
+        "pharmacy_one": pharmacy_one_params,
+        "update_items": update_items_params,
+        "open_cart": open_cart_params,
     }
 ```
 
-To inspect the full cached bundle for the logged-in client/company:
+## What Gets Added To An External API
 
-```python
-from fastapi import Depends
-from cloudon_admin_integration import require_all_module_entitlements
-from cloudon_admin_integration.dependencies import EntitlementsContext
+### 1. Requirements
 
-@app.get("/admin/parameters")
-async def admin_parameters(ctx: EntitlementsContext = Depends(require_all_module_entitlements)):
-    return ctx.model_dump()
+```txt
+git+https://github.com/cloudonorg/cloudon_admin_integration.git
+cryptography
 ```
 
-To scope that same bundle to one or more modules:
+### 2. Redis
 
-```python
-from cloudon_admin_integration import require_module_entitlements_for
-from cloudon_admin_integration.config import settings
+You need Redis available to the external API.
 
-Depends(require_module_entitlements_for(settings.app_module_codes))
+Per-project Redis is simplest.
+A shared Redis is also valid if you use a dedicated namespace.
+
+Recommended env:
+
+```env
+REDIS_HOST=redis
+REDIS_PORT=6379
+REDIS_DB=0
+REDIS_KEY_PREFIX="cloudon:integration"
+REDIS_PASSWORD=""
 ```
 
-The singular helpers still return one `EntitlementContext`, but its public dump is intentionally small:
+Actual cache keys look like:
 
-```json
-{
-  "module": "rapid_test",
-  "license": {
-    "expiration_date": "2026-08-21",
-    "status": "active"
-  },
-  "parameters": {}
-}
+```text
+cloudon:integration:effective:{domain}:{company_code}:{module_code}:{branch_code_or_root}
 ```
 
-The plural helpers return an `EntitlementsContext` list-like root model, so `ctx.model_dump()` yields a plain list of the same module objects.
+### 3. Admin-panel env
 
-`require_module_entitlements(...)` stays branch-aware, while `require_all_module_entitlements` and `GET /admin/parameters` ignore any branch selector and return the full company bundle.
+A working external API should have these admin-panel variables in its `.env` in addition to its own app-specific settings:
 
-## Minimal external API setup
+```env
+# Admin backend base
+DJANGO_API_URL="https://devadminpanel.cloudon.gr"
 
-If you want the smallest possible integration surface in an external FastAPI app:
+# JWT verification
+ADMIN_PANEL_JWT_ALGORITHM="RS256"
+ADMIN_PANEL_JWT_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n"
+ADMIN_PANEL_JWT_SIGNING_KEY=""
+ADMIN_PANEL_JWT_AUDIENCE=""
 
-1. Keep the package install.
-2. Add `wire_integration(app)`.
-3. Define either `APP_MODULE_CODE` or `APP_MODULE_CODES`.
-4. Use `require_module_entitlement` for a single protected module, or `require_module_entitlements` / `require_module_entitlements_for(...)` when you want the full bundle.
-5. Call `POST /auth/token` on the external API to bootstrap and cache the client's full entitlement bundle.
-6. Call `GET /admin/parameters` to inspect the full local cached bundle in the same compact shape.
+# Module context
+APP_MODULE_CODE="pharmacy_one"
+APP_MODULE_CODES=pharmacy_one,rapid_test,convert,open_cart
 
-The admin-panel URL and Redis are still runtime settings for the external API process, but they can live in shared deployment env/secrets rather than being hardcoded in the app itself. If you keep the default HS256 flow, the client secret doubles as the JWT verification key.
+# Backend endpoints
+ADMIN_PANEL_CLIENT_BOOTSTRAP_PATH="/api/client-auth/bootstrap/"
+ADMIN_PANEL_CLIENT_TOKEN_PATH="/api/client-auth/token/"
+ADMIN_PANEL_EFFECTIVE_CONFIG_RESOLVE_PATH="/api/client-auth/effective-configs/resolve/"
+ADMIN_PANEL_EFFECTIVE_CONFIG_RECONCILE_PATH="/api/client-auth/effective-configs/reconcile/"
 
-Webhook refreshes should target `POST /sync-redis-data` with the same `SYNC_KEY` that the backend sends in `X-Sync-Key`. The middleware now patches Redis directly from the webhook payload, so UI changes propagate without a full re-bootstrap. The legacy `/sync-single-license`, `/sync-single-param`, and `/sync-company-change` routes remain compatibility aliases and now apply the same incremental update logic.
+# Runtime behavior
+HTTP_TIMEOUT_SECONDS=10
+INTEGRATION_WRAP_RESPONSES=true
+CACHE_STALE_AFTER_SECONDS=3600
 
-`ADMIN_PANEL_CLIENT_ID` and `ADMIN_PANEL_CLIENT_SECRET` are only needed if you want `sync_on_startup=true` or you call `/auth/token` from a background job to prewarm the cache. They are not required for normal backend webhook refreshes.
+# Redis
+REDIS_HOST=redis
+REDIS_PORT=6379
+REDIS_DB=0
+REDIS_KEY_PREFIX="cloudon:integration"
+REDIS_PASSWORD=""
+```
 
-## Runtime flow
+Notes:
+- `ADMIN_PANEL_CLIENT_BOOTSTRAP_PATH` is the important one for external `/auth/token`
+- do not point bootstrap to backend `/api/client-auth/token/`
+- with `RS256`, external APIs should only get the public key
+- `ADMIN_PANEL_JWT_SIGNING_KEY` stays empty on external APIs
 
-1. Integration authenticates against the admin panel using `client_id` + `client_secret`.
-2. The bootstrap response returns the client token plus the current entitlement bundle for all licensed modules.
-3. Integration caches the bundle in local Redis as `entitlement:{domain}:{company_code}:{module_code}` and exposes a compact `{"module", "license", "parameters"}` view to app code.
-4. Admin-panel signals keep the local cache fresh when licenses or module settings change.
-5. API requests only read local Redis and validate the bearer token locally.
+### 4. Docker Compose
 
-## Versioned Effective Config Cache
+Typical external API compose additions:
 
-The integration package now treats Redis as a rebuildable local cache of backend-owned effective configs.
+```yaml
+services:
+  api:
+    environment:
+      - DJANGO_API_URL=${DJANGO_API_URL}
+      - ADMIN_PANEL_JWT_ALGORITHM=${ADMIN_PANEL_JWT_ALGORITHM}
+      - ADMIN_PANEL_JWT_PUBLIC_KEY=${ADMIN_PANEL_JWT_PUBLIC_KEY}
+      - ADMIN_PANEL_JWT_SIGNING_KEY=${ADMIN_PANEL_JWT_SIGNING_KEY}
+      - ADMIN_PANEL_JWT_AUDIENCE=${ADMIN_PANEL_JWT_AUDIENCE}
+      - APP_MODULE_CODE=${APP_MODULE_CODE}
+      - APP_MODULE_CODES=${APP_MODULE_CODES}
+      - ADMIN_PANEL_CLIENT_BOOTSTRAP_PATH=${ADMIN_PANEL_CLIENT_BOOTSTRAP_PATH}
+      - ADMIN_PANEL_CLIENT_TOKEN_PATH=${ADMIN_PANEL_CLIENT_TOKEN_PATH}
+      - ADMIN_PANEL_EFFECTIVE_CONFIG_RESOLVE_PATH=${ADMIN_PANEL_EFFECTIVE_CONFIG_RESOLVE_PATH}
+      - ADMIN_PANEL_EFFECTIVE_CONFIG_RECONCILE_PATH=${ADMIN_PANEL_EFFECTIVE_CONFIG_RECONCILE_PATH}
+      - HTTP_TIMEOUT_SECONDS=${HTTP_TIMEOUT_SECONDS}
+      - INTEGRATION_WRAP_RESPONSES=${INTEGRATION_WRAP_RESPONSES}
+      - CACHE_STALE_AFTER_SECONDS=${CACHE_STALE_AFTER_SECONDS}
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT}
+      - REDIS_DB=${REDIS_DB}
+      - REDIS_KEY_PREFIX=${REDIS_KEY_PREFIX}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
 
-### Current flow
+  redis:
+    image: redis:7
+```
 
-1. Bootstrap from `POST /api/client-auth/bootstrap/`.
-2. Cache `effective_configs` in Redis using a branch-aware key shape:
-   `effective:{domain}:{company_code}:{module_code}:{branch_code|root}`
-3. Receive webhook notifications on `/sync-redis-data`.
-4. Use the notification as a trigger and fetch authoritative config from:
-   - `POST /api/client-auth/effective-configs/resolve/`
-   - `POST /api/client-auth/effective-configs/reconcile/`
-5. Serve runtime checks from Redis only.
+## Endpoints Exposed By The Package
 
-### Runtime helpers
+Public external-API endpoint:
+- `POST /auth/token`
 
-Public helpers now include:
+This endpoint:
+- authenticates the client against backend
+- fetches backend bootstrap payload
+- stores `effective_configs` in Redis
+- returns the backend token/bootstrap response
+
+Webhook / sync endpoints:
+- `POST /sync-redis-data`
+- `POST /sync-single-license`
+- `POST /sync-single-param`
+- `POST /sync-company-change`
+- `GET /get-redis-data`
+
+Compatibility routes remain available, but the preferred model is:
+- backend webhook as notification
+- downstream refresh from backend authoritative endpoints
+
+## Runtime Dependency Helpers
+
+Single-module checks:
+- `require_module_entitlement`
+- `require_module_entitlement_for(module_code)`
+- `require_module_parameters`
+- `require_module_parameters_for(module_code)`
+
+Multi-module helpers:
+- `require_module_entitlements`
+- `require_module_entitlements_for(module_codes)`
+- `require_all_module_entitlements`
+
+Utility helpers:
 - `validate_license(client_key, module_code, branch_code=None)`
 - `get_parameters(client_key, module_code, branch_code=None)`
 - `get_effective_config(client_key, module_code, branch_code=None)`
 
-### Staleness and recovery
+## Redis / Cache Behavior
 
-Cache records store:
+Redis stores normalized effective-config rows including:
+- effective config payload
 - `version`
 - `updated_at`
 - `stale_at`
-- `effective_config`
 
-Recommended recovery paths:
-- startup bootstrap
-- webhook-triggered single refresh
-- periodic reconciliation using the stored sync cursor
-- full rebuild with `perform_full_sync()`
+The cache is disposable.
+If Redis is cleared, the external API can rebuild by calling `/auth/token` again for that client, or by running a refresh/reconcile path.
 
-### Environment additions
+## RS256 Notes
 
-- `ADMIN_PANEL_EFFECTIVE_CONFIG_RESOLVE_PATH=/api/client-auth/effective-configs/resolve/`
-- `ADMIN_PANEL_EFFECTIVE_CONFIG_RECONCILE_PATH=/api/client-auth/effective-configs/reconcile/`
-- `CACHE_STALE_AFTER_SECONDS=3600`
+Recommended production setup:
+- backend signs client tokens with private key
+- external APIs verify with public key
 
-### Migration notes
+Backend env example:
 
-- Old webhook payload shapes are still accepted by the compatibility routes.
-- New deployments should rely on notification payloads plus backend fetch, not inline webhook state.
-- Redis contents are disposable; backend remains authoritative.
+```env
+API_CLIENT_JWT_ALGORITHM="RS256"
+API_CLIENT_JWT_SIGNING_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+API_CLIENT_JWT_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n"
+API_CLIENT_JWT_AUDIENCE=""
+```
+
+External API env example:
+
+```env
+ADMIN_PANEL_JWT_ALGORITHM="RS256"
+ADMIN_PANEL_JWT_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n"
+ADMIN_PANEL_JWT_SIGNING_KEY=""
+ADMIN_PANEL_JWT_AUDIENCE=""
+```
+
+Important:
+- do not use Redis session overrides for `RS256` verification
+- `RS256` verification should use the configured public key
+
+## Startup / Full Sync
+
+Service-level full bootstrap is only available if you configure:
+- `ADMIN_PANEL_CLIENT_ID`
+- `ADMIN_PANEL_CLIENT_SECRET`
+
+That is optional.
+For the common per-client model, external APIs do not need service-wide credentials in env.
+
+If you do enable startup bootstrap, the package uses:
+- backend `/api/client-auth/bootstrap/`
+- then writes returned `effective_configs` into Redis
+
+## Troubleshooting
+
+### `/auth/token` succeeds but Redis has only session keys
+
+Cause:
+- bootstrap path was pointed at backend token endpoint instead of backend bootstrap endpoint
+
+Fix:
+- set `ADMIN_PANEL_CLIENT_BOOTSTRAP_PATH="/api/client-auth/bootstrap/"`
+
+### `Token invalid` with `RS256`
+
+Check:
+- `cryptography` is installed
+- external API has `ADMIN_PANEL_JWT_PUBLIC_KEY`
+- integration package version includes `RS256` verification fixes
+
+### `License not found`
+
+Check Redis for keys like:
+
+```text
+cloudon:integration:effective:{domain}:{company_code}:{module_code}:root
+```
+
+If missing, cache bootstrap/rebuild did not happen.
+
+### `License not running`
+
+Inspect the cached effective-config row.
+If license metadata is active but `active/is_running` is false, backend effective-config generation is inconsistent and must be recomputed/fixed on backend.
+
+## Migration Notes
+
+- backend remains authoritative
+- Redis is cache only
+- webhook payloads are notifications/triggers, not authoritative state
+- old compatibility sync routes still exist
+- new deployments should use `/bootstrap/`, `/resolve/`, `/reconcile/`, and local Redis reads
