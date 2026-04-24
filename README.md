@@ -98,44 +98,27 @@ cryptography
 ### 2. `.env.admin-panel`
 
 Create one `.env.admin-panel` file in each external API.
-It contains all variables needed by this integration: admin backend, token verification, module scope, Redis cache, and optional sync behavior.
+It contains all variables needed by this integration: admin backend, token verification, module scope, and Redis cache.
 
 ```env
 # Admin backend base
-DJANGO_API_URL=https://devadminpanel.cloudon.gr
+DJANGO_API_URL="https://devadminpanel.cloudon.gr"
 
-# JWT verification. External APIs should get only the public key for RS256.
-ADMIN_PANEL_JWT_ALGORITHM=RS256
+# JWT verification
+ADMIN_PANEL_JWT_ALGORITHM="RS256"
 ADMIN_PANEL_JWT_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n"
-# ADMIN_PANEL_JWT_AUDIENCE=
+ADMIN_PANEL_JWT_AUDIENCE=""
 
-# Module context.
-APP_MODULE_CODE=pharmacy_one
-# APP_MODULE_CODES=pharmacy_one,rapid_test,convert,open_cart
+# Module context
+APP_MODULE_CODE="pharmacy_one"
+APP_MODULE_CODES=pharmacy_one,rapid_test,convert,open_cart
 
-# Redis cache. In Docker, use the Redis service/container name, not localhost.
-REDIS_HOST=redis
-# REDIS_PORT=6379
-# REDIS_DB=0
-# REDIS_PASSWORD=
-# REDIS_KEY_PREFIX=cloudon:integration
-
-# Optional service-level startup sync. Not needed for the common per-client /auth/token flow.
-# SYNC_ON_STARTUP=true
-# ADMIN_PANEL_CLIENT_ID=change_me
-# ADMIN_PANEL_CLIENT_SECRET=change_me
-
-# Optional webhook protection if sync routes are used.
-# SYNC_KEY=change_me
-
-# Optional behavior overrides.
-# HTTP_TIMEOUT_SECONDS=10
-# ENFORCE_TOKEN_MODULE_MATCH=true
-# ADMIN_PANEL_LICENSE_EXTENSION_DAYS=10
-# LICENSE_EXPIRY_WARNING_DAYS=10
-# REQUIRE_MODULE_PARAMS=false
-# INTEGRATION_WRAP_RESPONSES=true
-# INTEGRATION_EXCLUDED_PATHS=/docs,/redoc,/openapi.json,/favicon.ico
+# Redis integration cache
+REDIS_HOST="redis"
+REDIS_PORT="6379"
+REDIS_DB="0"
+REDIS_PASSWORD=""
+REDIS_KEY_PREFIX="pharmacyone:integration"
 ```
 
 Notes:
@@ -165,10 +148,24 @@ CACHE_STALE_AFTER_SECONDS=3600
 SYNC_ON_STARTUP=false
 ```
 
+Optional service-level startup sync is only needed when the external API should bootstrap itself on startup:
+
+```env
+SYNC_ON_STARTUP=true
+ADMIN_PANEL_CLIENT_ID="change_me"
+ADMIN_PANEL_CLIENT_SECRET="change_me"
+```
+
+Optional webhook protection if sync routes are used:
+
+```env
+SYNC_KEY="change_me"
+```
+
 Actual cache keys look like:
 
 ```text
-cloudon:integration:effective:{domain}:{company_code}:{module_code}:{branch_code_or_root}
+pharmacyone:integration:effective:{domain}:{company_code}:{module_code}:{branch_code_or_root}
 ```
 
 ### 3. Docker Compose
