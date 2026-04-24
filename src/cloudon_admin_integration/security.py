@@ -66,7 +66,9 @@ async def _resolve_verification_key(token: str) -> str:
     cache_error: RuntimeError | None = None
     algorithm = settings.admin_panel_jwt_algorithm.upper()
 
-    if client_id:
+    # RS*/ES* verification should always use the configured public key.
+    # Redis session overrides are only meaningful for the legacy HS* flow.
+    if algorithm.startswith("HS") and client_id:
         try:
             from cloudon_admin_integration.dependencies import get_cache
 
@@ -79,10 +81,9 @@ async def _resolve_verification_key(token: str) -> str:
                 if verification_key:
                     return verification_key
 
-                if algorithm.startswith("HS"):
-                    client_secret = (session.get("client_secret") or "").strip()
-                    if client_secret:
-                        return client_secret
+                client_secret = (session.get("client_secret") or "").strip()
+                if client_secret:
+                    return client_secret
 
     try:
         return settings.jwt_verification_key()
