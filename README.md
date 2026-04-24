@@ -153,3 +153,51 @@ Webhook refreshes should target `POST /sync-redis-data` with the same `SYNC_KEY`
 3. Integration caches the bundle in local Redis as `entitlement:{domain}:{company_code}:{module_code}` and exposes a compact `{"module", "license", "parameters"}` view to app code.
 4. Admin-panel signals keep the local cache fresh when licenses or module settings change.
 5. API requests only read local Redis and validate the bearer token locally.
+
+## Versioned Effective Config Cache
+
+The integration package now treats Redis as a rebuildable local cache of backend-owned effective configs.
+
+### Current flow
+
+1. Bootstrap from `POST /api/client-auth/bootstrap/`.
+2. Cache `effective_configs` in Redis using a branch-aware key shape:
+   `effective:{domain}:{company_code}:{module_code}:{branch_code|root}`
+3. Receive webhook notifications on `/sync-redis-data`.
+4. Use the notification as a trigger and fetch authoritative config from:
+   - `POST /api/client-auth/effective-configs/resolve/`
+   - `POST /api/client-auth/effective-configs/reconcile/`
+5. Serve runtime checks from Redis only.
+
+### Runtime helpers
+
+Public helpers now include:
+- `validate_license(client_key, module_code, branch_code=None)`
+- `get_parameters(client_key, module_code, branch_code=None)`
+- `get_effective_config(client_key, module_code, branch_code=None)`
+
+### Staleness and recovery
+
+Cache records store:
+- `version`
+- `updated_at`
+- `stale_at`
+- `effective_config`
+
+Recommended recovery paths:
+- startup bootstrap
+- webhook-triggered single refresh
+- periodic reconciliation using the stored sync cursor
+- full rebuild with `perform_full_sync()`
+
+### Environment additions
+
+- `ADMIN_PANEL_EFFECTIVE_CONFIG_RESOLVE_PATH=/api/client-auth/effective-configs/resolve/`
+- `ADMIN_PANEL_EFFECTIVE_CONFIG_RECONCILE_PATH=/api/client-auth/effective-configs/reconcile/`
+- `CACHE_STALE_AFTER_SECONDS=3600`
+
+### Migration notes
+
+- Old webhook payload shapes are still accepted by the compatibility routes.
+- New deployments should rely on notification payloads plus backend fetch, not inline webhook state.
+- Redis contents are disposable; backend remains authoritative.

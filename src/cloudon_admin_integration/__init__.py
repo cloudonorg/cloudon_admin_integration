@@ -3,6 +3,8 @@ from cloudon_admin_integration.dependencies import (
     EntitlementLicenseContext,
     EntitlementsContext,
     get_cache,
+    get_effective_config,
+    get_parameters,
     get_settings,
     require_module_entitlement,
     require_module_entitlement_for,
@@ -11,8 +13,9 @@ from cloudon_admin_integration.dependencies import (
     require_module_entitlements,
     require_all_module_entitlements,
     require_module_entitlements_for,
-    startup_integration,
     shutdown_integration,
+    startup_integration,
+    validate_license,
 )
 from cloudon_admin_integration.plugplay import entitlement_dependency, entitlements_dependency, wire_integration
 from cloudon_admin_integration.responses import wire_response_envelope
@@ -24,6 +27,8 @@ __all__ = [
     "EntitlementLicenseContext",
     "EntitlementsContext",
     "get_cache",
+    "get_effective_config",
+    "get_parameters",
     "get_settings",
     "entitlement_dependency",
     "entitlements_dependency",
@@ -38,6 +43,7 @@ __all__ = [
     "shutdown_integration",
     "startup_integration",
     "sync_router",
+    "validate_license",
     "wire_response_envelope",
     "wire_integration",
 ]

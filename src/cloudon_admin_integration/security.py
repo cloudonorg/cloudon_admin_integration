@@ -64,19 +64,24 @@ async def _resolve_verification_key(token: str) -> str:
     unverified = _peek_unverified_claims(token) or {}
     client_id = (unverified.get("client_id") or "").strip() or None
     cache_error: RuntimeError | None = None
+    algorithm = settings.admin_panel_jwt_algorithm.upper()
 
     if client_id:
         try:
             from cloudon_admin_integration.dependencies import get_cache
-
             session = await get_cache().get_client_session(client_id)
         except RuntimeError as exc:
             cache_error = exc
         else:
             if isinstance(session, dict):
-                verification_key = (session.get("verification_key") or session.get("client_secret") or "").strip()
+                verification_key = (session.get("verification_key") or "").strip()
                 if verification_key:
                     return verification_key
+
+                if algorithm.startswith("HS"):
+                    client_secret = (session.get("client_secret") or "").strip()
+                    if client_secret:
+                        return client_secret
 
     try:
         return settings.jwt_verification_key()
