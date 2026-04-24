@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from cloudon_admin_integration.admin_client import AdminPanelClient
 from cloudon_admin_integration.config import IntegrationSettings
@@ -78,6 +79,23 @@ class AdminPanelClientNormalizationTests(unittest.TestCase):
         self.assertEqual(records[0]["params"]["api_user"], "main")
         self.assertEqual(records[0]["version"], 42)
         self.assertEqual(session["sync_cursor"], 42)
+
+
+class IntegrationSettingsTests(unittest.TestCase):
+    def test_from_env_uses_fixed_admin_endpoint_defaults(self):
+        with patch.dict("os.environ", {}, clear=True):
+            settings = IntegrationSettings.from_env()
+
+        self.assertEqual(settings.admin_panel_client_bootstrap_path, "/api/client-auth/bootstrap/")
+        self.assertEqual(
+            settings.admin_panel_effective_config_resolve_path,
+            "/api/client-auth/effective-configs/resolve/",
+        )
+        self.assertEqual(
+            settings.admin_panel_effective_config_reconcile_path,
+            "/api/client-auth/effective-configs/reconcile/",
+        )
+        self.assertFalse(settings.sync_on_startup)
 
 
 if __name__ == "__main__":

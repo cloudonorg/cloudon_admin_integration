@@ -2,6 +2,11 @@ import os
 from dataclasses import dataclass
 
 
+DEFAULT_CLIENT_BOOTSTRAP_PATH = "/api/client-auth/bootstrap/"
+DEFAULT_EFFECTIVE_CONFIG_RESOLVE_PATH = "/api/client-auth/effective-configs/resolve/"
+DEFAULT_EFFECTIVE_CONFIG_RECONCILE_PATH = "/api/client-auth/effective-configs/reconcile/"
+
+
 def _as_bool(value: str | None, default: bool) -> bool:
     if value is None:
         return default
@@ -73,21 +78,18 @@ class IntegrationSettings:
             app_module_codes=module_codes,
             admin_panel_base_url=base_url,
             admin_panel_client_bootstrap_path=(
-                os.getenv("ADMIN_PANEL_CLIENT_BOOTSTRAP_PATH")
-                or "/api/client-auth/bootstrap/"
+                os.getenv("ADMIN_PANEL_CLIENT_BOOTSTRAP_PATH") or DEFAULT_CLIENT_BOOTSTRAP_PATH
             ).strip(),
             admin_panel_effective_config_resolve_path=(
-                os.getenv("ADMIN_PANEL_EFFECTIVE_CONFIG_RESOLVE_PATH")
-                or "/api/client-auth/effective-configs/resolve/"
+                os.getenv("ADMIN_PANEL_EFFECTIVE_CONFIG_RESOLVE_PATH") or DEFAULT_EFFECTIVE_CONFIG_RESOLVE_PATH
             ).strip(),
             admin_panel_effective_config_reconcile_path=(
-                os.getenv("ADMIN_PANEL_EFFECTIVE_CONFIG_RECONCILE_PATH")
-                or "/api/client-auth/effective-configs/reconcile/"
+                os.getenv("ADMIN_PANEL_EFFECTIVE_CONFIG_RECONCILE_PATH") or DEFAULT_EFFECTIVE_CONFIG_RECONCILE_PATH
             ).strip(),
             admin_panel_client_id=(os.getenv("ADMIN_PANEL_CLIENT_ID") or "").strip() or None,
             admin_panel_client_secret=(os.getenv("ADMIN_PANEL_CLIENT_SECRET") or "").strip() or None,
             http_timeout_seconds=float(os.getenv("HTTP_TIMEOUT_SECONDS") or 10),
-            sync_on_startup=_as_bool(os.getenv("SYNC_ON_STARTUP"), True),
+            sync_on_startup=_as_bool(os.getenv("SYNC_ON_STARTUP"), False),
             sync_key=(os.getenv("SYNC_KEY") or "").strip() or None,
             redis_host=(os.getenv("REDIS_HOST") or "localhost").strip(),
             redis_port=int(os.getenv("REDIS_PORT") or 6379),

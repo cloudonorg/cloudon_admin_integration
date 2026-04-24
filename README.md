@@ -120,7 +120,7 @@ cloudon:integration:effective:{domain}:{company_code}:{module_code}:{branch_code
 
 ### 3. Admin-panel env
 
-A working external API should have these admin-panel variables in its `.env` in addition to its own app-specific settings:
+For the common per-client model, a new external API only needs the deployment-specific admin-panel settings in addition to its own app settings:
 
 ```env
 # Admin backend base
@@ -129,37 +129,38 @@ DJANGO_API_URL="https://devadminpanel.cloudon.gr"
 # JWT verification
 ADMIN_PANEL_JWT_ALGORITHM="RS256"
 ADMIN_PANEL_JWT_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n"
-ADMIN_PANEL_JWT_SIGNING_KEY=""
 ADMIN_PANEL_JWT_AUDIENCE=""
 
 # Module context
 APP_MODULE_CODE="pharmacy_one"
-APP_MODULE_CODES=pharmacy_one,rapid_test,convert,open_cart
-
-# Backend endpoints
-ADMIN_PANEL_CLIENT_BOOTSTRAP_PATH="/api/client-auth/bootstrap/"
-ADMIN_PANEL_CLIENT_TOKEN_PATH="/api/client-auth/token/"
-ADMIN_PANEL_EFFECTIVE_CONFIG_RESOLVE_PATH="/api/client-auth/effective-configs/resolve/"
-ADMIN_PANEL_EFFECTIVE_CONFIG_RECONCILE_PATH="/api/client-auth/effective-configs/reconcile/"
-
-# Runtime behavior
-HTTP_TIMEOUT_SECONDS=10
-INTEGRATION_WRAP_RESPONSES=true
-CACHE_STALE_AFTER_SECONDS=3600
-
-# Redis
-REDIS_HOST=redis
-REDIS_PORT=6379
-REDIS_DB=0
-REDIS_KEY_PREFIX="cloudon:integration"
-REDIS_PASSWORD=""
+# APP_MODULE_CODES=pharmacy_one,rapid_test,convert,open_cart
 ```
 
 Notes:
-- `ADMIN_PANEL_CLIENT_BOOTSTRAP_PATH` is the important one for external `/auth/token`
-- do not point bootstrap to backend `/api/client-auth/token/`
+- for a single-module API, `APP_MODULE_CODE` is enough
+- for a multi-module API, set `APP_MODULE_CODES`; `APP_MODULE_CODE` defaults to the first code if omitted
+- `ADMIN_PANEL_JWT_AUDIENCE` can be omitted when the backend token has no audience
 - with `RS256`, external APIs should only get the public key
-- `ADMIN_PANEL_JWT_SIGNING_KEY` stays empty on external APIs
+- do not set `ADMIN_PANEL_JWT_SIGNING_KEY` on external APIs
+
+These backend endpoint paths are fixed defaults in the package and usually should not be set per external API:
+
+```env
+ADMIN_PANEL_CLIENT_BOOTSTRAP_PATH="/api/client-auth/bootstrap/"
+ADMIN_PANEL_EFFECTIVE_CONFIG_RESOLVE_PATH="/api/client-auth/effective-configs/resolve/"
+ADMIN_PANEL_EFFECTIVE_CONFIG_RECONCILE_PATH="/api/client-auth/effective-configs/reconcile/"
+```
+
+Only override them if the admin backend routes actually change. `ADMIN_PANEL_CLIENT_TOKEN_PATH` is not used by this package.
+
+Runtime behavior also has defaults:
+
+```env
+HTTP_TIMEOUT_SECONDS=10
+INTEGRATION_WRAP_RESPONSES=true
+CACHE_STALE_AFTER_SECONDS=3600
+SYNC_ON_STARTUP=false
+```
 
 ### 4. Docker Compose
 
@@ -170,24 +171,13 @@ services:
   api:
     environment:
       - DJANGO_API_URL=${DJANGO_API_URL}
-      - ADMIN_PANEL_JWT_ALGORITHM=${ADMIN_PANEL_JWT_ALGORITHM}
+      - ADMIN_PANEL_JWT_ALGORITHM=RS256
       - ADMIN_PANEL_JWT_PUBLIC_KEY=${ADMIN_PANEL_JWT_PUBLIC_KEY}
-      - ADMIN_PANEL_JWT_SIGNING_KEY=${ADMIN_PANEL_JWT_SIGNING_KEY}
       - ADMIN_PANEL_JWT_AUDIENCE=${ADMIN_PANEL_JWT_AUDIENCE}
       - APP_MODULE_CODE=${APP_MODULE_CODE}
-      - APP_MODULE_CODES=${APP_MODULE_CODES}
-      - ADMIN_PANEL_CLIENT_BOOTSTRAP_PATH=${ADMIN_PANEL_CLIENT_BOOTSTRAP_PATH}
-      - ADMIN_PANEL_CLIENT_TOKEN_PATH=${ADMIN_PANEL_CLIENT_TOKEN_PATH}
-      - ADMIN_PANEL_EFFECTIVE_CONFIG_RESOLVE_PATH=${ADMIN_PANEL_EFFECTIVE_CONFIG_RESOLVE_PATH}
-      - ADMIN_PANEL_EFFECTIVE_CONFIG_RECONCILE_PATH=${ADMIN_PANEL_EFFECTIVE_CONFIG_RECONCILE_PATH}
-      - HTTP_TIMEOUT_SECONDS=${HTTP_TIMEOUT_SECONDS}
-      - INTEGRATION_WRAP_RESPONSES=${INTEGRATION_WRAP_RESPONSES}
-      - CACHE_STALE_AFTER_SECONDS=${CACHE_STALE_AFTER_SECONDS}
-      - REDIS_HOST=${REDIS_HOST}
-      - REDIS_PORT=${REDIS_PORT}
-      - REDIS_DB=${REDIS_DB}
-      - REDIS_KEY_PREFIX=${REDIS_KEY_PREFIX}
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      # For multi-module APIs, set APP_MODULE_CODES too.
+      # - APP_MODULE_CODES=${APP_MODULE_CODES}
+      - REDIS_HOST=redis
 
   redis:
     image: redis:7
@@ -274,7 +264,9 @@ Important:
 
 ## Startup / Full Sync
 
-Service-level full bootstrap is only available if you configure:
+Startup sync is disabled by default.
+
+Service-level full bootstrap is only available if you set `SYNC_ON_STARTUP=true` and configure:
 - `ADMIN_PANEL_CLIENT_ID`
 - `ADMIN_PANEL_CLIENT_SECRET`
 
@@ -290,10 +282,10 @@ If you do enable startup bootstrap, the package uses:
 ### `/auth/token` succeeds but Redis has only session keys
 
 Cause:
-- bootstrap path was pointed at backend token endpoint instead of backend bootstrap endpoint
+- bootstrap path was overridden to the backend token endpoint instead of the backend bootstrap endpoint
 
 Fix:
-- set `ADMIN_PANEL_CLIENT_BOOTSTRAP_PATH="/api/client-auth/bootstrap/"`
+- remove the override, or set `ADMIN_PANEL_CLIENT_BOOTSTRAP_PATH="/api/client-auth/bootstrap/"`
 
 ### `Token invalid` with `RS256`
 
