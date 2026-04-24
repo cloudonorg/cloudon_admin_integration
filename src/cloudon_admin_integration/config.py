@@ -78,10 +78,12 @@ class IntegrationSettings:
                 or "/api/client-auth/bootstrap/"
             ).strip(),
             admin_panel_effective_config_resolve_path=(
-                os.getenv("ADMIN_PANEL_EFFECTIVE_CONFIG_RESOLVE_PATH") or "/api/client-auth/effective-configs/resolve/"
+                os.getenv("ADMIN_PANEL_EFFECTIVE_CONFIG_RESOLVE_PATH")
+                or "/api/client-auth/effective-configs/resolve/"
             ).strip(),
             admin_panel_effective_config_reconcile_path=(
-                os.getenv("ADMIN_PANEL_EFFECTIVE_CONFIG_RECONCILE_PATH") or "/api/client-auth/effective-configs/reconcile/"
+                os.getenv("ADMIN_PANEL_EFFECTIVE_CONFIG_RECONCILE_PATH")
+                or "/api/client-auth/effective-configs/reconcile/"
             ).strip(),
             admin_panel_client_id=(os.getenv("ADMIN_PANEL_CLIENT_ID") or "").strip() or None,
             admin_panel_client_secret=(os.getenv("ADMIN_PANEL_CLIENT_SECRET") or "").strip() or None,
@@ -92,7 +94,7 @@ class IntegrationSettings:
             redis_port=int(os.getenv("REDIS_PORT") or 6379),
             redis_db=int(os.getenv("REDIS_DB") or 0),
             redis_password=(os.getenv("REDIS_PASSWORD") or "").strip() or None,
-            redis_key_prefix=(os.getenv("REDIS_KEY_PREFIX") or "pharmacyone:integration").strip(),
+            redis_key_prefix=(os.getenv("REDIS_KEY_PREFIX") or "cloudon:integration").strip(),
             admin_panel_jwt_algorithm=(os.getenv("ADMIN_PANEL_JWT_ALGORITHM") or "HS256").strip(),
             admin_panel_jwt_signing_key=_normalize_key_material(os.getenv("ADMIN_PANEL_JWT_SIGNING_KEY")),
             admin_panel_jwt_public_key=_normalize_key_material(os.getenv("ADMIN_PANEL_JWT_PUBLIC_KEY")),

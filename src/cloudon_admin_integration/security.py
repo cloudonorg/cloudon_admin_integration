@@ -69,6 +69,7 @@ async def _resolve_verification_key(token: str) -> str:
     if client_id:
         try:
             from cloudon_admin_integration.dependencies import get_cache
+
             session = await get_cache().get_client_session(client_id)
         except RuntimeError as exc:
             cache_error = exc
@@ -114,9 +115,9 @@ async def require_valid_api_client_token(
             audience=settings.admin_panel_jwt_audience,
             options={"verify_aud": bool(settings.admin_panel_jwt_audience)},
         )
-    except jwt.ExpiredSignatureError as exc:
+    except jwt.ExpiredSignatureError:
         _fail(401, "token_expired", "Token expired")
-    except jwt.InvalidTokenError as exc:
+    except jwt.InvalidTokenError:
         _fail(401, "token_invalid", "Invalid token")
     except RuntimeError as exc:
         _fail(500, "token_verification_unavailable", str(exc))
