@@ -74,7 +74,6 @@ class IntegrationSettings:
             admin_panel_base_url=base_url,
             admin_panel_client_bootstrap_path=(
                 os.getenv("ADMIN_PANEL_CLIENT_BOOTSTRAP_PATH")
-                or os.getenv("ADMIN_PANEL_CLIENT_TOKEN_PATH")
                 or "/api/client-auth/bootstrap/"
             ).strip(),
             admin_panel_effective_config_resolve_path=(

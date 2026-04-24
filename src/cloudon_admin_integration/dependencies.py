@@ -62,8 +62,12 @@ async def bootstrap_and_cache_client(
         module_code=module_code,
     )
     records, client_session = api_client.normalize_bootstrap_bundle(payload)
+    algorithm = settings.admin_panel_jwt_algorithm.upper()
     client_session["client_secret"] = client_secret
-    client_session["verification_key"] = client_secret
+    if algorithm.startswith("HS"):
+        client_session["verification_key"] = client_secret
+    else:
+        client_session.pop("verification_key", None)
     rebuild_info = await cache_client.rebuild(records, client_session=client_session)
 
     response = dict(payload)
