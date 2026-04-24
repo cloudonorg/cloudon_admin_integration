@@ -80,17 +80,25 @@ async def refresh_effective_config(
     module_code: str,
     *,
     branch_code: int | str | None = None,
+    client_id: str | None = None,
+    client_secret: str | None = None,
     cache: IntegrationCache | None = None,
     admin_client: AdminPanelClient | None = None,
 ) -> dict[str, Any]:
     cache_client = cache or _cache
     api_client = admin_client or _admin_client
-    payload = await api_client.resolve_effective_config(module_code=module_code, branch_code=branch_code)
+    payload = await api_client.resolve_effective_config(
+        client_id=client_id,
+        client_secret=client_secret,
+        module_code=module_code,
+        branch_code=branch_code,
+    )
     record = api_client._normalize_effective_config(payload.get("effective_config") or {})
     if not record:
         raise httpx.HTTPError("Effective config not found")
     await cache_client.upsert_effective_config(record)
-    session = await cache_client.get_client_session(settings.admin_panel_client_id) if settings.admin_panel_client_id else None
+    session_client_id = (client_id or settings.admin_panel_client_id or "").strip() or None
+    session = await cache_client.get_client_session(session_client_id) if session_client_id else None
     if session is not None and payload.get("sync_cursor") is not None:
         session["sync_cursor"] = int(payload.get("sync_cursor") or 0)
         await cache_client.store_client_session(session)
@@ -100,13 +108,19 @@ async def refresh_effective_config(
 async def reconcile_effective_configs(
     *,
     since_version: int | None = None,
+    client_id: str | None = None,
+    client_secret: str | None = None,
     cache: IntegrationCache | None = None,
     admin_client: AdminPanelClient | None = None,
 ) -> dict[str, Any]:
     cache_client = cache or _cache
     api_client = admin_client or _admin_client
     current_cursor = since_version if since_version is not None else await cache_client.get_sync_cursor()
-    payload = await api_client.reconcile_effective_configs(since_version=current_cursor)
+    payload = await api_client.reconcile_effective_configs(
+        client_id=client_id,
+        client_secret=client_secret,
+        since_version=current_cursor,
+    )
     records = [
         record
         for item in (payload.get("effective_configs") or [])
@@ -129,6 +143,11 @@ async def reconcile_effective_configs(
         replaced += 1
     sync_cursor = int(payload.get("sync_cursor") or current_cursor or 0)
     await cache_client.set_sync_cursor(sync_cursor)
+    session_client_id = (client_id or settings.admin_panel_client_id or "").strip() or None
+    session = await cache_client.get_client_session(session_client_id) if session_client_id else None
+    if session is not None:
+        session["sync_cursor"] = sync_cursor
+        await cache_client.store_client_session(session)
     return {"replaced": replaced, "deleted": deleted, "cursor": sync_cursor, "records": len(records)}
 
 
@@ -274,6 +293,104 @@ async def _resolve_entitlement_scope(
     )
 
 
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    if value in (None, "", "null"):
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    raw = raw.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        return parsed.astimezone().replace(tzinfo=None)
+    return parsed
+
+
+def _record_is_stale(record: dict[str, Any]) -> bool:
+    stale_at = _parse_iso_datetime(record.get("stale_at"))
+    if stale_at is None:
+        return False
+    return stale_at <= datetime.utcnow()
+
+
+def _scope_client_credentials(scope: _ResolvedEntitlementScope) -> tuple[str | None, str | None]:
+    session = scope.session or {}
+    client_id = (scope.client_id or session.get("client_id") or settings.admin_panel_client_id or "").strip() or None
+    client_secret = (session.get("client_secret") or settings.admin_panel_client_secret or "").strip() or None
+    return client_id, client_secret
+
+
+async def _refresh_scope_record(
+    scope: _ResolvedEntitlementScope,
+    module_code: str,
+    *,
+    cache: IntegrationCache,
+    admin_client: AdminPanelClient | None = None,
+) -> dict[str, Any] | None:
+    client_id, client_secret = _scope_client_credentials(scope)
+    if not client_id or not client_secret:
+        return None
+    try:
+        return await refresh_effective_config(
+            module_code,
+            branch_code=scope.branch_code,
+            client_id=client_id,
+            client_secret=client_secret,
+            cache=cache,
+            admin_client=admin_client,
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response is not None and exc.response.status_code == 404:
+            return None
+        raise
+
+
+async def _get_effective_record(
+    scope: _ResolvedEntitlementScope,
+    module_code: str,
+    *,
+    cache: IntegrationCache,
+    admin_client: AdminPanelClient | None = None,
+) -> dict[str, Any] | None:
+    cached = await cache.get_entitlement(scope.domain, scope.company_code, module_code, scope.branch_code)
+    refreshable = bool((scope.session or {}).get("client_secret")) or bool(settings.admin_panel_client_secret)
+    if refreshable:
+        try:
+            refreshed = await _refresh_scope_record(scope, module_code, cache=cache, admin_client=admin_client)
+            if refreshed is not None:
+                return refreshed
+        except Exception as exc:
+            logger.warning("Runtime refresh failed for company=%s module=%s branch=%s: %s", scope.company_code, module_code, scope.branch_code, exc)
+    if cached is not None and not _record_is_stale(cached):
+        return cached
+    return cached
+
+
+async def _reconcile_scope_cache(
+    scope: _ResolvedEntitlementScope,
+    *,
+    cache: IntegrationCache,
+    admin_client: AdminPanelClient | None = None,
+) -> None:
+    client_id, client_secret = _scope_client_credentials(scope)
+    if not client_id or not client_secret:
+        return
+    since_version = _to_int_or_none((scope.session or {}).get("sync_cursor")) or None
+    try:
+        await reconcile_effective_configs(
+            since_version=since_version,
+            client_id=client_id,
+            client_secret=client_secret,
+            cache=cache,
+            admin_client=admin_client,
+        )
+    except Exception as exc:
+        logger.warning("Runtime reconcile failed for company=%s domain=%s: %s", scope.company_code, scope.domain, exc)
+
+
 def _build_entitlement_context(record: dict[str, Any], *, scope: _ResolvedEntitlementScope, claims: ApiClientClaims, module_code: str, cfg: IntegrationSettings) -> EntitlementContext:
     license_to_date = _safe_date_string(record.get("license_to_date"))
     public_status = _normalize_public_license_status(record, license_to_date, cfg)
@@ -306,11 +423,12 @@ async def _load_cached_entitlements(
     scope: _ResolvedEntitlementScope,
     *,
     module_codes: str | Sequence[str] | None = None,
+    admin_client: AdminPanelClient | None = None,
 ) -> list[dict[str, Any]]:
     codes = _normalize_module_codes(module_codes) or settings.app_module_codes
     records: list[dict[str, Any]] = []
     for code in codes:
-        record = await cache.get_entitlement(scope.domain, scope.company_code, code, scope.branch_code)
+        record = await _get_effective_record(scope, code, cache=cache, admin_client=admin_client)
         if record:
             records.append(record)
     return records
@@ -355,7 +473,7 @@ async def _require_module_entitlement(
     if token_module and token_module not in {module_code, "*"}:
         _fail(403, "token_module_mismatch", "Token is not valid for this module")
     scope = await _resolve_entitlement_scope(request, claims, cache)
-    record = await cache.get_entitlement(scope.domain, scope.company_code, module_code, scope.branch_code)
+    record = await _get_effective_record(scope, module_code, cache=cache)
     if not record:
         _fail(403, "license_not_found", "No cached effective config found for company/module/branch")
     if not bool(record.get("is_running")):
@@ -429,6 +547,7 @@ async def require_all_module_entitlements(
     cfg: IntegrationSettings = Depends(get_settings),
 ) -> EntitlementsContext:
     scope = await _resolve_entitlement_scope(request, claims, cache)
+    await _reconcile_scope_cache(scope, cache=cache)
     records = await cache.list_entitlements(company_code=scope.company_code, domain=scope.domain)
     company_level = [record for record in records if record.get("branch_code") in (None, "", 0)]
     return EntitlementsContext([
