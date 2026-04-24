@@ -112,6 +112,11 @@ REDIS_KEY_PREFIX="cloudon:integration"
 REDIS_PASSWORD=""
 ```
 
+Docker note:
+- `localhost` inside the API container is the API container itself, not Redis
+- with Docker Compose, use the Redis service name, usually `REDIS_HOST=redis`
+- with manually started containers, use the Redis container name, for example `REDIS_HOST=pharmacyone_redis`, and put both containers on the same Docker network
+
 Actual cache keys look like:
 
 ```text
@@ -308,6 +313,17 @@ If missing, cache bootstrap/rebuild did not happen.
 
 Inspect the cached effective-config row.
 If license metadata is active but `active/is_running` is false, backend effective-config generation is inconsistent and must be recomputed/fixed on backend.
+
+### Startup fails connecting to Redis localhost
+
+Cause:
+- `REDIS_HOST` was not passed to the API container, so the package used its local default `localhost`
+- in Docker, `localhost` points to the API container, not the Redis container
+
+Fix:
+- set `REDIS_HOST=redis` when Redis is a Docker Compose service named `redis`
+- set `REDIS_HOST=pharmacyone_redis` if you are using that container name directly
+- make sure the API and Redis containers are attached to the same Docker network
 
 ## Migration Notes
 

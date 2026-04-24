@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from typing import Any
 
 import redis.asyncio as redis
+from redis.exceptions import RedisError
 
 from cloudon_admin_integration.config import IntegrationSettings
 
@@ -102,7 +103,17 @@ class IntegrationCache:
             password=self.cfg.redis_password,
             decode_responses=True,
         )
-        await self.redis.ping()
+        try:
+            await self.redis.ping()
+        except RedisError as exc:
+            self.redis = None
+            raise RuntimeError(
+                "Redis unavailable at "
+                f"REDIS_HOST={self.cfg.redis_host!r} REDIS_PORT={self.cfg.redis_port}. "
+                "When the API runs in Docker, REDIS_HOST must be the Redis service/container "
+                "name on the same Docker network, such as 'redis' or 'pharmacyone_redis', "
+                "not 'localhost'."
+            ) from exc
 
     async def disconnect(self) -> None:
         if self.redis is not None:
