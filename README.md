@@ -95,50 +95,47 @@ git+https://github.com/cloudonorg/cloudon_admin_integration.git
 cryptography
 ```
 
-### 2. Redis
+### 2. `.env.admin-panel`
 
-You need Redis available to the external API.
-
-Per-project Redis is simplest.
-A shared Redis is also valid if you use a dedicated namespace.
-
-Recommended env:
-
-```env
-REDIS_HOST=redis
-REDIS_PORT=6379
-REDIS_DB=0
-REDIS_KEY_PREFIX="cloudon:integration"
-REDIS_PASSWORD=""
-```
-
-Docker note:
-- `localhost` inside the API container is the API container itself, not Redis
-- with Docker Compose, use the Redis service name, usually `REDIS_HOST=redis`
-- with manually started containers, use the Redis container name, for example `REDIS_HOST=pharmacyone_redis`, and put both containers on the same Docker network
-
-Actual cache keys look like:
-
-```text
-cloudon:integration:effective:{domain}:{company_code}:{module_code}:{branch_code_or_root}
-```
-
-### 3. Admin-panel env
-
-For the common per-client model, a new external API only needs the deployment-specific admin-panel settings in addition to its own app settings:
+Create one `.env.admin-panel` file in each external API.
+It contains all variables needed by this integration: admin backend, token verification, module scope, Redis cache, and optional sync behavior.
 
 ```env
 # Admin backend base
-DJANGO_API_URL="https://devadminpanel.cloudon.gr"
+DJANGO_API_URL=https://devadminpanel.cloudon.gr
 
-# JWT verification
-ADMIN_PANEL_JWT_ALGORITHM="RS256"
+# JWT verification. External APIs should get only the public key for RS256.
+ADMIN_PANEL_JWT_ALGORITHM=RS256
 ADMIN_PANEL_JWT_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n"
-ADMIN_PANEL_JWT_AUDIENCE=""
+# ADMIN_PANEL_JWT_AUDIENCE=
 
-# Module context
-APP_MODULE_CODE="pharmacy_one"
+# Module context.
+APP_MODULE_CODE=pharmacy_one
 # APP_MODULE_CODES=pharmacy_one,rapid_test,convert,open_cart
+
+# Redis cache. In Docker, use the Redis service/container name, not localhost.
+REDIS_HOST=redis
+# REDIS_PORT=6379
+# REDIS_DB=0
+# REDIS_PASSWORD=
+# REDIS_KEY_PREFIX=cloudon:integration
+
+# Optional service-level startup sync. Not needed for the common per-client /auth/token flow.
+# SYNC_ON_STARTUP=true
+# ADMIN_PANEL_CLIENT_ID=change_me
+# ADMIN_PANEL_CLIENT_SECRET=change_me
+
+# Optional webhook protection if sync routes are used.
+# SYNC_KEY=change_me
+
+# Optional behavior overrides.
+# HTTP_TIMEOUT_SECONDS=10
+# ENFORCE_TOKEN_MODULE_MATCH=true
+# ADMIN_PANEL_LICENSE_EXTENSION_DAYS=10
+# LICENSE_EXPIRY_WARNING_DAYS=10
+# REQUIRE_MODULE_PARAMS=false
+# INTEGRATION_WRAP_RESPONSES=true
+# INTEGRATION_EXCLUDED_PATHS=/docs,/redoc,/openapi.json,/favicon.ico
 ```
 
 Notes:
@@ -147,16 +144,17 @@ Notes:
 - `ADMIN_PANEL_JWT_AUDIENCE` can be omitted when the backend token has no audience
 - with `RS256`, external APIs should only get the public key
 - do not set `ADMIN_PANEL_JWT_SIGNING_KEY` on external APIs
+- `localhost` inside the API container is the API container itself, not Redis
+- with Docker Compose, use the Redis service name, usually `REDIS_HOST=redis`
+- with manually started containers, use the Redis container name, for example `REDIS_HOST=pharmacyone_redis`, and put both containers on the same Docker network
 
 These backend endpoint paths are fixed defaults in the package and usually should not be set per external API:
+- `ADMIN_PANEL_CLIENT_BOOTSTRAP_PATH=/api/client-auth/bootstrap/`
+- `ADMIN_PANEL_EFFECTIVE_CONFIG_RESOLVE_PATH=/api/client-auth/effective-configs/resolve/`
+- `ADMIN_PANEL_EFFECTIVE_CONFIG_RECONCILE_PATH=/api/client-auth/effective-configs/reconcile/`
 
-```env
-ADMIN_PANEL_CLIENT_BOOTSTRAP_PATH="/api/client-auth/bootstrap/"
-ADMIN_PANEL_EFFECTIVE_CONFIG_RESOLVE_PATH="/api/client-auth/effective-configs/resolve/"
-ADMIN_PANEL_EFFECTIVE_CONFIG_RECONCILE_PATH="/api/client-auth/effective-configs/reconcile/"
-```
-
-Only override them if the admin backend routes actually change. `ADMIN_PANEL_CLIENT_TOKEN_PATH` is not used by this package.
+Only override them if the admin backend routes actually change.
+`ADMIN_PANEL_CLIENT_TOKEN_PATH` is not used by this package.
 
 Runtime behavior also has defaults:
 
@@ -167,22 +165,23 @@ CACHE_STALE_AFTER_SECONDS=3600
 SYNC_ON_STARTUP=false
 ```
 
-### 4. Docker Compose
+Actual cache keys look like:
+
+```text
+cloudon:integration:effective:{domain}:{company_code}:{module_code}:{branch_code_or_root}
+```
+
+### 3. Docker Compose
 
 Typical external API compose additions:
 
 ```yaml
 services:
   api:
-    environment:
-      - DJANGO_API_URL=${DJANGO_API_URL}
-      - ADMIN_PANEL_JWT_ALGORITHM=RS256
-      - ADMIN_PANEL_JWT_PUBLIC_KEY=${ADMIN_PANEL_JWT_PUBLIC_KEY}
-      - ADMIN_PANEL_JWT_AUDIENCE=${ADMIN_PANEL_JWT_AUDIENCE}
-      - APP_MODULE_CODE=${APP_MODULE_CODE}
-      # For multi-module APIs, set APP_MODULE_CODES too.
-      # - APP_MODULE_CODES=${APP_MODULE_CODES}
-      - REDIS_HOST=redis
+    env_file:
+      - .env.admin-panel
+    depends_on:
+      - redis
 
   redis:
     image: redis:7
@@ -254,13 +253,12 @@ API_CLIENT_JWT_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-
 API_CLIENT_JWT_AUDIENCE=""
 ```
 
-External API env example:
+External API `.env.admin-panel` example:
 
 ```env
-ADMIN_PANEL_JWT_ALGORITHM="RS256"
+ADMIN_PANEL_JWT_ALGORITHM=RS256
 ADMIN_PANEL_JWT_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n"
-ADMIN_PANEL_JWT_SIGNING_KEY=""
-ADMIN_PANEL_JWT_AUDIENCE=""
+# ADMIN_PANEL_JWT_AUDIENCE=
 ```
 
 Important:
