@@ -35,6 +35,78 @@ cryptography
 
 `cryptography` is required for `RS256` token verification.
 
+### Private GitHub Access During Docker Builds
+
+This package is installed from a private GitHub repository. Any external API image that installs this requirement during `docker compose build` must provide a GitHub token at build time.
+
+Do not commit a real token to `README.md`, `requirements.txt`, `dockerfile`, `docker-compose.yml`, `.env`, or `.env.admin-panel`. Use a short-lived shell environment variable and pass it as a BuildKit secret.
+
+Create a GitHub personal access token with read access to this repository:
+- preferred: fine-grained token scoped to `cloudonorg/cloudon_admin_integration`
+- required repository permission: `Contents: Read-only`
+- fallback: classic token with `repo` scope, only if fine-grained tokens are blocked
+
+Set the token only in the terminal that runs the build:
+
+```bash
+cd /path/to/external-api
+read -rsp "GitHub token: " GITHUB_TOKEN; echo
+export GITHUB_TOKEN
+
+docker compose up -d --build
+
+unset GITHUB_TOKEN
+```
+
+Use `docker compose`, not legacy `docker-compose`.
+
+Example `dockerfile` pattern:
+
+```dockerfile
+# syntax=docker/dockerfile:1
+FROM python:3.11
+
+WORKDIR /app
+
+COPY requirements.txt /app/
+RUN --mount=type=secret,id=github_token,required=true \
+    set -eu; \
+    GITHUB_TOKEN="$(cat /run/secrets/github_token)"; \
+    git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"; \
+    pip install --no-cache-dir -r requirements.txt; \
+    git config --global --unset-all url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf
+
+COPY . /app
+```
+
+Example `docker-compose.yml` build secret:
+
+```yaml
+services:
+  api:
+    build:
+      context: .
+      dockerfile: dockerfile
+      secrets:
+        - github_token
+
+secrets:
+  github_token:
+    environment: GITHUB_TOKEN
+```
+
+Recommended `.dockerignore` entries:
+
+```text
+.env
+.env.*
+.github-token
+__pycache__/
+*.pyc
+```
+
+If a token is accidentally pasted into chat, committed, logged, or shared, revoke it in GitHub and generate a new one.
+
 ## Minimal FastAPI Wiring
 
 ```python
