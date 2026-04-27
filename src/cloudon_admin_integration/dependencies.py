@@ -254,6 +254,90 @@ def _license_warning_message(days_left: int) -> str:
     return f"License about to expire in {days_left} day{suffix}"
 
 
+def _is_root_effective_record(record: dict[str, Any]) -> bool:
+    branch_code = record.get("branch_code")
+    return branch_code in (None, "", 0, "0")
+
+
+def _copy_params(record: dict[str, Any] | None) -> dict[str, Any]:
+    params = (record or {}).get("params")
+    return dict(params) if isinstance(params, dict) else {}
+
+
+def _branch_sort_key(record: dict[str, Any]) -> tuple[int, str, str]:
+    branch_code = _to_int_or_none(record.get("branch_code"))
+    return (
+        branch_code if branch_code is not None else 10**12,
+        str(record.get("branch_code") or ""),
+        str(record.get("branch_name") or ""),
+    )
+
+
+def _has_parameters_payload(params: Any) -> bool:
+    if not isinstance(params, dict) or not params:
+        return False
+    if params.get("mode") != "BRANCHES":
+        return bool(params)
+    if isinstance(params.get("master"), dict) and bool(params.get("master")):
+        return True
+    branches = params.get("branches") if isinstance(params.get("branches"), list) else []
+    metadata_keys = {"branch_id", "branch_code", "branch_name"}
+    return any(bool(set(branch.keys()) - metadata_keys) for branch in branches if isinstance(branch, dict))
+
+
+def _select_validation_record(records: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
+    if not records:
+        return None
+    roots = [record for record in records if _is_root_effective_record(record)]
+    if roots:
+        return sorted(roots, key=lambda item: int(item.get("version") or 0), reverse=True)[0]
+    return sorted(records, key=lambda item: int(item.get("version") or 0), reverse=True)[0]
+
+
+def _build_module_parameters_payload(anchor_record: dict[str, Any], records: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    active_records = [record for record in records if not record.get("deleted")]
+    root_record = _select_validation_record([record for record in active_records if _is_root_effective_record(record)])
+    master = _copy_params(root_record or anchor_record)
+    branch_records = [record for record in active_records if not _is_root_effective_record(record)]
+
+    if not branch_records:
+        return master
+
+    branches: list[dict[str, Any]] = []
+    for record in sorted(branch_records, key=_branch_sort_key):
+        item = _copy_params(record)
+        item["branch_id"] = record.get("branch_id")
+        item["branch_code"] = _to_int_or_none(record.get("branch_code")) or record.get("branch_code")
+        item["branch_name"] = record.get("branch_name")
+        branches.append(item)
+
+    return {
+        "mode": "BRANCHES",
+        "master": master,
+        "branches": branches,
+    }
+
+
+def _validate_entitlement_record(
+    request: Request,
+    record: dict[str, Any],
+    cfg: IntegrationSettings,
+    *,
+    check_params: bool = True,
+) -> None:
+    if not bool(record.get("is_running")):
+        _fail(403, "license_not_running", "License is not running")
+    if not is_license_current(record.get("license_to_date"), True, cfg.license_extension_days):
+        _fail(403, "license_expired", "License has expired")
+    if check_params and cfg.require_module_params and not _has_parameters_payload(record.get("params") or {}):
+        _fail(403, "params_not_found", "Parameters not found for this module")
+    license_date = parse_date_or_none(record.get("license_to_date"))
+    if license_date:
+        days_left = (license_date - datetime.utcnow().date()).days
+        if 0 <= days_left <= cfg.license_expiry_warning_days:
+            request.state.integration_message = _license_warning_message(days_left)
+
+
 async def _resolve_entitlement_scope(
     request: Request,
     claims: ApiClientClaims,
@@ -476,18 +560,48 @@ async def _require_module_entitlement(
     record = await _get_effective_record(scope, module_code, cache=cache)
     if not record:
         _fail(403, "license_not_found", "No cached effective config found for company/module/branch")
-    if not bool(record.get("is_running")):
-        _fail(403, "license_not_running", "License is not running")
-    if not is_license_current(record.get("license_to_date"), True, cfg.license_extension_days):
-        _fail(403, "license_expired", "License has expired")
-    if cfg.require_module_params and not (record.get("params") or {}):
-        _fail(403, "params_not_found", "Parameters not found for this module")
-    license_date = parse_date_or_none(record.get("license_to_date"))
-    if license_date:
-        days_left = (license_date - datetime.utcnow().date()).days
-        if 0 <= days_left <= cfg.license_expiry_warning_days:
-            request.state.integration_message = _license_warning_message(days_left)
+    _validate_entitlement_record(request, record, cfg)
     return _build_entitlement_context(record, scope=scope, claims=claims, module_code=module_code, cfg=cfg)
+
+
+async def _require_module_parameters_payload(
+    request: Request,
+    claims: ApiClientClaims,
+    cache: IntegrationCache,
+    cfg: IntegrationSettings,
+    *,
+    module_code: str,
+) -> dict[str, Any]:
+    token_module = claims.module_code
+    if token_module and token_module not in {module_code, "*"}:
+        _fail(403, "token_module_mismatch", "Token is not valid for this module")
+
+    scope = await _resolve_entitlement_scope(request, claims, cache)
+    if scope.branch_code is None:
+        await _reconcile_scope_cache(scope, cache=cache)
+
+    record = await _get_effective_record(scope, module_code, cache=cache)
+    records: list[dict[str, Any]] = []
+    if scope.branch_code is None:
+        records = await cache.list_entitlements(
+            company_code=scope.company_code,
+            domain=scope.domain,
+            module_code=module_code,
+        )
+        record = record or _select_validation_record(records)
+
+    if not record:
+        _fail(403, "license_not_found", "No cached effective config found for company/module/branch")
+
+    _validate_entitlement_record(request, record, cfg, check_params=False)
+    if scope.branch_code is None:
+        parameters = _build_module_parameters_payload(record, records or [record])
+    else:
+        parameters = record.get("params") or {}
+
+    if cfg.require_module_params and not _has_parameters_payload(parameters):
+        _fail(403, "params_not_found", "Parameters not found for this module")
+    return parameters
 
 
 async def require_module_entitlement(
@@ -512,16 +626,22 @@ def require_module_entitlement_for(module_code: str):
 
 
 async def require_module_parameters(
-    entitlement: EntitlementContext = Depends(require_module_entitlement),
+    request: Request,
+    claims: ApiClientClaims = Depends(require_valid_api_client_token),
+    cache: IntegrationCache = Depends(get_cache),
+    cfg: IntegrationSettings = Depends(get_settings),
 ) -> dict[str, Any]:
-    return entitlement.parameters
+    return await _require_module_parameters_payload(request, claims, cache, cfg, module_code=cfg.app_module_code)
 
 
 def require_module_parameters_for(module_code: str):
     async def _dep(
-        entitlement: EntitlementContext = Depends(require_module_entitlement_for(module_code)),
+        request: Request,
+        claims: ApiClientClaims = Depends(require_valid_api_client_token),
+        cache: IntegrationCache = Depends(get_cache),
+        cfg: IntegrationSettings = Depends(get_settings),
     ) -> dict[str, Any]:
-        return entitlement.parameters
+        return await _require_module_parameters_payload(request, claims, cache, cfg, module_code=module_code)
 
     return _dep
 

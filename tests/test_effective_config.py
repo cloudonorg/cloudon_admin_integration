@@ -1,9 +1,91 @@
 import unittest
-from unittest.mock import patch
+from datetime import date, timedelta
+from unittest.mock import AsyncMock, patch
 
 from cloudon_admin_integration.admin_client import AdminPanelClient
 from cloudon_admin_integration.config import IntegrationSettings
+from cloudon_admin_integration.dependencies import (
+    _build_module_parameters_payload,
+    _require_module_parameters_payload,
+)
 from cloudon_admin_integration.responses import normalize_response_payload
+from cloudon_admin_integration.security import ApiClientClaims
+
+
+class _Request:
+    def __init__(self, headers=None):
+        self.headers = headers or {}
+        self.state = type("State", (), {})()
+
+
+class _Settings:
+    license_extension_days = 0
+    require_module_params = False
+    license_expiry_warning_days = 10
+
+
+class _Cache:
+    def __init__(self, records):
+        self.records = list(records)
+
+    async def get_client_session(self, client_id):
+        return None
+
+    async def get_entitlement(self, domain, company_code, module_code, branch_code=None):
+        for record in self.records:
+            if str(record.get("domain")) != str(domain):
+                continue
+            if str(record.get("company_code")) != str(company_code):
+                continue
+            if str(record.get("module_code")) != str(module_code):
+                continue
+            record_branch = record.get("branch_code")
+            if branch_code is not None and str(record_branch) == str(branch_code):
+                return record
+            if branch_code is None and record_branch in (None, "", 0, "0"):
+                return record
+        return None
+
+    async def list_entitlements(self, **filters):
+        rows = []
+        for record in self.records:
+            if filters.get("company_code") is not None and str(record.get("company_code")) != str(
+                filters["company_code"]
+            ):
+                continue
+            if filters.get("domain") is not None and str(record.get("domain")) != str(filters["domain"]):
+                continue
+            if filters.get("module_code") is not None and str(record.get("module_code")) != str(
+                filters["module_code"]
+            ):
+                continue
+            rows.append(record)
+        return rows
+
+
+def _effective_record(branch_code, params, **overrides):
+    record = {
+        "company_id": "company-1",
+        "company_code": 10,
+        "domain": "pocyfuse",
+        "module_code": "sinopsis",
+        "branch_code": branch_code,
+        "params": params,
+        "is_running": True,
+        "license_to_date": (date.today() + timedelta(days=30)).isoformat(),
+        "version": 1,
+    }
+    record.update(overrides)
+    return record
+
+
+def _claims():
+    return ApiClientClaims(
+        token_type="api_client",
+        company_id="company-1",
+        company_code=10,
+        infrastructure_domain="pocyfuse",
+    )
 
 
 class AdminPanelClientNormalizationTests(unittest.TestCase):
@@ -151,6 +233,101 @@ class ResponseEnvelopeTests(unittest.TestCase):
                 "data": None,
             },
         )
+
+
+class ModuleParameterPayloadTests(unittest.TestCase):
+    def test_branch_records_are_returned_with_master_payload(self):
+        root = {
+            "module_code": "sinopsis",
+            "branch_code": None,
+            "params": {"api_url": "https://example.test"},
+            "version": 10,
+        }
+        branch = {
+            "module_code": "sinopsis",
+            "branch_id": "branch-101",
+            "branch_code": 101,
+            "branch_name": "Main Branch",
+            "params": {"live": True},
+            "version": 11,
+        }
+
+        self.assertEqual(
+            _build_module_parameters_payload(root, [root, branch]),
+            {
+                "mode": "BRANCHES",
+                "master": {"api_url": "https://example.test"},
+                "branches": [
+                    {
+                        "live": True,
+                        "branch_id": "branch-101",
+                        "branch_code": 101,
+                        "branch_name": "Main Branch",
+                    }
+                ],
+            },
+        )
+
+    def test_company_only_record_keeps_flat_parameters(self):
+        root = {
+            "module_code": "pharmacy_one",
+            "branch_code": None,
+            "params": {"enabled": True},
+            "version": 10,
+        }
+
+        self.assertEqual(_build_module_parameters_payload(root, [root]), {"enabled": True})
+
+
+class ModuleParameterDependencyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_token_only_scope_returns_all_module_parameters(self):
+        root = _effective_record(None, {})
+        branch = _effective_record(
+            101,
+            {"live": True},
+            branch_id="branch-101",
+            branch_name="Main Branch",
+            version=2,
+        )
+
+        with patch("cloudon_admin_integration.dependencies._reconcile_scope_cache", new=AsyncMock()):
+            params = await _require_module_parameters_payload(
+                _Request(),
+                _claims(),
+                _Cache([root, branch]),
+                _Settings(),
+                module_code="sinopsis",
+            )
+
+        self.assertEqual(
+            params,
+            {
+                "mode": "BRANCHES",
+                "master": {},
+                "branches": [
+                    {
+                        "live": True,
+                        "branch_id": "branch-101",
+                        "branch_code": 101,
+                        "branch_name": "Main Branch",
+                    }
+                ],
+            },
+        )
+
+    async def test_branch_scope_keeps_branch_parameters_only(self):
+        root = _effective_record(None, {"root": True})
+        branch = _effective_record(101, {"live": True}, branch_id="branch-101", branch_name="Main Branch")
+
+        params = await _require_module_parameters_payload(
+            _Request(headers={"X-Branch-Code": "101"}),
+            _claims(),
+            _Cache([root, branch]),
+            _Settings(),
+            module_code="sinopsis",
+        )
+
+        self.assertEqual(params, {"live": True})
 
 
 if __name__ == "__main__":

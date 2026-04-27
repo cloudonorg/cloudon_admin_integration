@@ -148,6 +148,25 @@ async def pharmacy_one(
     return params
 ```
 
+When the bearer token is company-scoped and no branch is present in the token or `X-Branch-Code`,
+`require_module_parameters_for("module_code")` returns the full module parameter payload for that client.
+Company-only modules keep the flat parameter dict. Branch-based modules return:
+
+```json
+{
+  "mode": "BRANCHES",
+  "master": {},
+  "branches": [
+    {
+      "branch_id": "branch-uuid",
+      "branch_code": 101,
+      "branch_name": "Main Branch",
+      "live": true
+    }
+  ]
+}
+```
+
 Multi-module checks:
 
 ```python
