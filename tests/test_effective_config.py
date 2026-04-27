@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 from cloudon_admin_integration.admin_client import AdminPanelClient
 from cloudon_admin_integration.config import IntegrationSettings
+from cloudon_admin_integration.responses import normalize_response_payload
 
 
 class AdminPanelClientNormalizationTests(unittest.TestCase):
@@ -96,6 +97,60 @@ class IntegrationSettingsTests(unittest.TestCase):
             "/api/client-auth/effective-configs/reconcile/",
         )
         self.assertFalse(settings.sync_on_startup)
+
+
+class ResponseEnvelopeTests(unittest.TestCase):
+    def test_structured_http_error_detail_keeps_reason_and_message(self):
+        payload = {
+            "detail": {
+                "reason": "license_not_found",
+                "message": "No cached effective config found for company/module/branch",
+            }
+        }
+
+        self.assertEqual(
+            normalize_response_payload(payload, 403),
+            {
+                "success": False,
+                "error": "license_not_found",
+                "message": "No cached effective config found for company/module/branch",
+                "data": None,
+            },
+        )
+
+    def test_existing_failure_envelope_keeps_message(self):
+        payload = {
+            "success": False,
+            "error": "license_expired",
+            "message": "License has expired",
+            "data": {"ignored": True},
+        }
+
+        self.assertEqual(
+            normalize_response_payload(payload, 403),
+            {
+                "success": False,
+                "error": "license_expired",
+                "message": "License has expired",
+                "data": None,
+            },
+        )
+
+    def test_top_level_error_payload_keeps_message(self):
+        payload = {
+            "error": "admin_panel_unavailable",
+            "message": "Could not reach admin panel",
+        }
+
+        self.assertEqual(
+            normalize_response_payload(payload, 502),
+            {
+                "success": False,
+                "error": "admin_panel_unavailable",
+                "message": "Could not reach admin panel",
+                "data": None,
+            },
+        )
 
 
 if __name__ == "__main__":
