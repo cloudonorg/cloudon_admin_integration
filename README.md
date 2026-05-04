@@ -48,7 +48,7 @@ REDIS_HOST="redis"
 REDIS_PORT="6379"
 REDIS_DB="0"
 REDIS_PASSWORD=""
-REDIS_KEY_PREFIX="pharmacyone:integration"
+REDIS_KEY_PREFIX="cloudon:integration"
 ```
 
 Module notes:
@@ -487,7 +487,7 @@ The cache is disposable. If Redis is cleared, the external API can rebuild by ca
 Actual cache keys look like:
 
 ```text
-pharmacyone:integration:{module_code}:{domain}:{company_code}
+cloudon:integration:{module_code}:{domain}:{company_code}
 ```
 
 The value is one JSON document for the company-level module entitlement. License state lives at the
