@@ -24,7 +24,7 @@ _admin_client = AdminPanelClient(settings)
 @dataclass(frozen=True)
 class _ResolvedEntitlementScope:
     client_id: str | None
-    company_id: str
+    company_id: str | None
     company_code: int
     domain: str
     branch_code: int | None
@@ -264,6 +264,43 @@ def _copy_params(record: dict[str, Any] | None) -> dict[str, Any]:
     return dict(params) if isinstance(params, dict) else {}
 
 
+def _params_look_like_container(params: dict[str, Any]) -> bool:
+    return isinstance(params.get("master"), dict) or isinstance(params.get("branches"), list)
+
+
+def _parameter_container(params: dict[str, Any]) -> dict[str, Any]:
+    if not _params_look_like_container(params):
+        return {
+            "mode": "BRANCHES",
+            "master": dict(params),
+            "branches": [],
+        }
+    return {
+        **params,
+        "mode": params.get("mode") or "BRANCHES",
+        "master": params.get("master") if isinstance(params.get("master"), dict) else {},
+        "branches": params.get("branches") if isinstance(params.get("branches"), list) else [],
+    }
+
+
+def _branch_code_matches(value: Any, branch_code: Any) -> bool:
+    return _to_int_or_none(value) == _to_int_or_none(branch_code)
+
+
+def _select_branch_parameters(params: dict[str, Any], branch_code: int | None) -> dict[str, Any]:
+    if branch_code is None:
+        return params
+    container = _parameter_container(params)
+    master = container.get("master") if isinstance(container.get("master"), dict) else {}
+    branches = container.get("branches") if isinstance(container.get("branches"), list) else []
+    for branch in branches:
+        if not isinstance(branch, dict):
+            continue
+        if _branch_code_matches(branch.get("branch_code") or branch.get("branch"), branch_code):
+            return dict(branch)
+    return dict(master)
+
+
 def _branch_sort_key(record: dict[str, Any]) -> tuple[int, str, str]:
     branch_code = _to_int_or_none(record.get("branch_code"))
     return (
@@ -298,6 +335,8 @@ def _build_module_parameters_payload(anchor_record: dict[str, Any], records: Seq
     active_records = [record for record in records if not record.get("deleted")]
     root_record = _select_validation_record([record for record in active_records if _is_root_effective_record(record)])
     master = _copy_params(root_record or anchor_record)
+    if _params_look_like_container(master):
+        return master
     branch_records = [record for record in active_records if not _is_root_effective_record(record)]
 
     if not branch_records:
@@ -374,6 +413,32 @@ async def _resolve_entitlement_scope(
         domain=domain,
         branch_code=header_branch_code if header_branch_code is not None else claims.branch_code,
         session=session,
+    )
+
+
+async def _resolve_header_entitlement_scope(request: Request) -> _ResolvedEntitlementScope:
+    header_domain = (
+        request.headers.get("X-Infrastructure-Domain")
+        or request.headers.get("X-Domain")
+        or request.headers.get("domain")
+        or ""
+    ).strip() or None
+    header_company_id = (request.headers.get("X-Company-Id") or "").strip() or None
+    header_company_code = _to_int_or_none(request.headers.get("X-Company-Code") or request.headers.get("company"))
+    header_branch_code = _to_int_or_none(request.headers.get("X-Branch-Code") or request.headers.get("branch"))
+
+    if not header_domain:
+        _fail(403, "domain_missing", "Could not resolve infrastructure domain from header")
+    if header_company_code is None:
+        _fail(403, "company_code_missing", "Could not resolve company_code from header")
+
+    return _ResolvedEntitlementScope(
+        client_id=None,
+        company_id=header_company_id,
+        company_code=header_company_code,
+        domain=header_domain,
+        branch_code=header_branch_code,
+        session=None,
     )
 
 
@@ -478,15 +543,16 @@ async def _reconcile_scope_cache(
 def _build_entitlement_context(record: dict[str, Any], *, scope: _ResolvedEntitlementScope, claims: ApiClientClaims, module_code: str, cfg: IntegrationSettings) -> EntitlementContext:
     license_to_date = _safe_date_string(record.get("license_to_date"))
     public_status = _normalize_public_license_status(record, license_to_date, cfg)
+    parameters = _select_branch_parameters(record.get("params") or {}, scope.branch_code)
     return EntitlementContext(
         module=module_code,
         license=EntitlementLicenseContext(
             expiration_date=license_to_date,
             status=public_status,
         ),
-        parameters=record.get("params") or {},
+        parameters=parameters,
         effective_config=record.get("effective_config") or {},
-        company_id=str(record.get("company_id") or scope.company_id),
+        company_id=str(record.get("company_id") or scope.company_id or ""),
         company_code=_to_int_or_none(record.get("company_code")) or scope.company_code,
         company_name=record.get("company_name") or claims.company_name,
         infrastructure_domain=record.get("domain") or scope.domain,
@@ -597,8 +663,46 @@ async def _require_module_parameters_payload(
     if scope.branch_code is None:
         parameters = _build_module_parameters_payload(record, records or [record])
     else:
-        parameters = record.get("params") or {}
+        parameters = _select_branch_parameters(record.get("params") or {}, scope.branch_code)
 
+    if cfg.require_module_params and not _has_parameters_payload(parameters):
+        _fail(403, "params_not_found", "Parameters not found for this module")
+    return parameters
+
+
+async def _require_header_module_entitlement(
+    request: Request,
+    cache: IntegrationCache,
+    cfg: IntegrationSettings,
+    *,
+    module_code: str,
+) -> EntitlementContext:
+    scope = await _resolve_header_entitlement_scope(request)
+    record = await _get_effective_record(scope, module_code, cache=cache)
+    if not record:
+        _fail(403, "license_not_found", "No cached effective config found for company/module/branch")
+    _validate_entitlement_record(request, record, cfg)
+    claims = ApiClientClaims(
+        token_type="header",
+        company_id=scope.company_id,
+        company_code=scope.company_code,
+        infrastructure_domain=scope.domain,
+        branch_code=scope.branch_code,
+        module_code=module_code,
+        raw={"source": "headers"},
+    )
+    return _build_entitlement_context(record, scope=scope, claims=claims, module_code=module_code, cfg=cfg)
+
+
+async def _require_header_module_parameters_payload(
+    request: Request,
+    cache: IntegrationCache,
+    cfg: IntegrationSettings,
+    *,
+    module_code: str,
+) -> dict[str, Any]:
+    entitlement = await _require_header_module_entitlement(request, cache, cfg, module_code=module_code)
+    parameters = entitlement.parameters
     if cfg.require_module_params and not _has_parameters_payload(parameters):
         _fail(403, "params_not_found", "Parameters not found for this module")
     return parameters
@@ -646,6 +750,28 @@ def require_module_parameters_for(module_code: str):
     return _dep
 
 
+def require_header_module_entitlement_for(module_code: str):
+    async def _dep(
+        request: Request,
+        cache: IntegrationCache = Depends(get_cache),
+        cfg: IntegrationSettings = Depends(get_settings),
+    ) -> EntitlementContext:
+        return await _require_header_module_entitlement(request, cache, cfg, module_code=module_code)
+
+    return _dep
+
+
+def require_header_module_parameters_for(module_code: str):
+    async def _dep(
+        request: Request,
+        cache: IntegrationCache = Depends(get_cache),
+        cfg: IntegrationSettings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        return await _require_header_module_parameters_payload(request, cache, cfg, module_code=module_code)
+
+    return _dep
+
+
 async def require_module_entitlements(
     request: Request,
     claims: ApiClientClaims = Depends(require_valid_api_client_token),
@@ -669,10 +795,9 @@ async def require_all_module_entitlements(
     scope = await _resolve_entitlement_scope(request, claims, cache)
     await _reconcile_scope_cache(scope, cache=cache)
     records = await cache.list_entitlements(company_code=scope.company_code, domain=scope.domain)
-    company_level = [record for record in records if record.get("branch_code") in (None, "", 0)]
     return EntitlementsContext([
         _build_entitlement_context(record, scope=scope, claims=claims, module_code=str(record.get("module_code")), cfg=cfg)
-        for record in company_level
+        for record in records
     ])
 
 
@@ -745,10 +870,13 @@ async def get_effective_config(client_key: str | None, module_code: str, *, bran
 
 
 async def get_parameters(client_key: str | None, module_code: str, *, branch_code: int | None = None) -> dict[str, Any]:
-    config = await get_effective_config(client_key, module_code, branch_code=branch_code)
-    if not isinstance(config, dict):
+    session = await _cache.get_client_session(client_key) if client_key else None
+    if not session:
         return {}
-    return config.get("parameters") or {}
+    record = await _cache.get_entitlement(session.get("infrastructure_domain"), session.get("company_code"), module_code, branch_code)
+    if not record:
+        return {}
+    return _select_branch_parameters(record.get("params") or {}, branch_code)
 
 
 async def validate_license(client_key: str | None, module_code: str, *, branch_code: int | None = None) -> bool:

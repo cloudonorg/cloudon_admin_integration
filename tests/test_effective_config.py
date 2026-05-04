@@ -6,6 +6,7 @@ from cloudon_admin_integration.admin_client import AdminPanelClient
 from cloudon_admin_integration.config import IntegrationSettings
 from cloudon_admin_integration.dependencies import (
     _build_module_parameters_payload,
+    _require_header_module_parameters_payload,
     _require_module_parameters_payload,
 )
 from cloudon_admin_integration.responses import normalize_response_payload
@@ -40,6 +41,12 @@ class _Cache:
             if str(record.get("module_code")) != str(module_code):
                 continue
             record_branch = record.get("branch_code")
+            branches = (record.get("params") or {}).get("branches") if isinstance(record.get("params"), dict) else []
+            if branch_code is not None and any(
+                isinstance(branch, dict) and str(branch.get("branch_code")) == str(branch_code)
+                for branch in (branches or [])
+            ):
+                return record
             if branch_code is not None and str(record_branch) == str(branch_code):
                 return record
             if branch_code is None and record_branch in (None, "", 0, "0"):
@@ -236,6 +243,26 @@ class ResponseEnvelopeTests(unittest.TestCase):
 
 
 class ModuleParameterPayloadTests(unittest.TestCase):
+    def test_aggregate_record_keeps_master_and_branch_payload(self):
+        root = {
+            "module_code": "retail_zoom",
+            "branch_code": None,
+            "params": {
+                "mode": "BRANCHES",
+                "master": {"enabled": True},
+                "branches": [
+                    {
+                        "branch_code": 101,
+                        "branch_name": "Main Branch",
+                        "softone_branch": 1001,
+                    }
+                ],
+            },
+            "version": 12,
+        }
+
+        self.assertEqual(_build_module_parameters_payload(root, [root]), root["params"])
+
     def test_branch_records_are_returned_with_master_payload(self):
         root = {
             "module_code": "sinopsis",
@@ -328,6 +355,61 @@ class ModuleParameterDependencyTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(params, {"live": True})
+
+    async def test_branch_scope_reads_branch_from_aggregate_record(self):
+        aggregate = _effective_record(
+            None,
+            {
+                "mode": "BRANCHES",
+                "master": {"default_days": 30},
+                "branches": [
+                    {
+                        "branch_code": 101,
+                        "branch_id": "branch-101",
+                        "branch_name": "Main Branch",
+                        "live": True,
+                    }
+                ],
+            },
+        )
+
+        params = await _require_module_parameters_payload(
+            _Request(headers={"X-Branch-Code": "101"}),
+            _claims(),
+            _Cache([aggregate]),
+            _Settings(),
+            module_code="sinopsis",
+        )
+
+        self.assertEqual(
+            params,
+            {
+                "branch_code": 101,
+                "branch_id": "branch-101",
+                "branch_name": "Main Branch",
+                "live": True,
+            },
+        )
+
+    async def test_header_scope_reads_parameters_without_bearer_token(self):
+        aggregate = _effective_record(
+            None,
+            {
+                "mode": "BRANCHES",
+                "master": {"default_days": 30},
+                "branches": [{"branch_code": 101, "retail_zoom_enabled": True}],
+            },
+            module_code="retail_zoom",
+        )
+
+        params = await _require_header_module_parameters_payload(
+            _Request(headers={"domain": "pocyfuse", "company": "10", "branch": "101"}),
+            _Cache([aggregate]),
+            _Settings(),
+            module_code="retail_zoom",
+        )
+
+        self.assertEqual(params, {"branch_code": 101, "retail_zoom_enabled": True})
 
 
 if __name__ == "__main__":

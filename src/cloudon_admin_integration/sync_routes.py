@@ -1,11 +1,13 @@
 from typing import Any, Literal
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from cloudon_admin_integration.admin_client import AdminPanelClient
 from cloudon_admin_integration.cache import IntegrationCache
 from cloudon_admin_integration.dependencies import (
+    get_admin_client,
     get_cache,
     perform_full_sync,
     reconcile_effective_configs,
@@ -67,6 +69,50 @@ class WebhookSyncPayload(BaseModel):
     to_date: str | None = None
     state: str | None = None
     revoked_at: str | None = None
+
+
+def _normalize_operation(value: Any) -> str:
+    raw = str(value or "upsert").strip().lower()
+    if raw in {"delete", "deleted", "remove", "removed", "destroy", "destroyed"}:
+        return "delete"
+    return "upsert"
+
+
+async def _apply_direct_effective_payload(
+    item: dict[str, Any],
+    *,
+    cache: IntegrationCache,
+    admin_client: AdminPanelClient,
+) -> dict[str, Any] | None:
+    record = admin_client._normalize_effective_config(item)
+    if not record:
+        return None
+    operation = _normalize_operation(item.get("operation"))
+    if operation == "delete" or record.get("deleted"):
+        deleted = await cache.delete_effective_config(
+            record.get("domain"),
+            record.get("company_code"),
+            record.get("module_code"),
+            record.get("branch_code"),
+        )
+        return {
+            "applied": [{"type": "effective_config", "operation": "delete", "deleted": deleted}],
+            "applied_count": 1,
+        }
+    applied = await cache.upsert_effective_config(record)
+    return {
+        "applied": [
+            {
+                "type": "effective_config",
+                "operation": "upsert",
+                "module_code": applied.get("module_code"),
+                "company_code": applied.get("company_code"),
+                "domain": applied.get("domain"),
+                "version": applied.get("version"),
+            }
+        ],
+        "applied_count": 1,
+    }
 
 
 async def _apply_legacy_payload(
@@ -175,6 +221,23 @@ async def _apply_notification_payload(
     return {"applied": [{"type": "reconcile", **result}], "applied_count": 1}
 
 
+async def _apply_sync_item(
+    item: Any,
+    *,
+    cache: IntegrationCache,
+    admin_client: AdminPanelClient,
+) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        raise HTTPException(
+            status_code=400,
+            detail={"reason": "sync_payload_invalid", "message": "Sync payload must be a JSON object"},
+        )
+    direct = await _apply_direct_effective_payload(item, cache=cache, admin_client=admin_client)
+    if direct is not None:
+        return direct
+    return await _apply_legacy_payload(WebhookSyncPayload(**item), cache=cache)
+
+
 @sync_router.post("/sync-single-license", dependencies=[Depends(require_sync_key)])
 async def sync_single_license(
     payload: SingleLicenseSyncPayload,
@@ -261,15 +324,24 @@ async def sync_company_change(payload: CompanySyncPayload, cache: IntegrationCac
 
 @sync_router.post("/sync-redis-data", dependencies=[Depends(require_sync_key)])
 async def sync_redis_data(
-    payload: WebhookSyncPayload,
+    payload: Any = Body(default=None),
     cache: IntegrationCache = Depends(get_cache),
+    admin_client: AdminPanelClient = Depends(get_admin_client),
 ):
     try:
-        if payload.event_id or payload.version or payload.event_type:
-            result = await _apply_notification_payload(payload, cache=cache)
-        else:
-            result = await _apply_legacy_payload(payload, cache=cache)
-        return {"status": "ok", "operation": payload.operation, "result": result}
+        payload = payload or {}
+        items = payload if isinstance(payload, list) else [payload]
+        results = [await _apply_sync_item(item, cache=cache, admin_client=admin_client) for item in items]
+        if len(results) == 1:
+            return {"status": "ok", "operation": "sync", "result": results[0]}
+        return {
+            "status": "ok",
+            "operation": "batch",
+            "result": {
+                "applied": results,
+                "applied_count": sum(item.get("applied_count", 0) for item in results),
+            },
+        }
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Admin panel sync failed: {exc}") from exc
     except RuntimeError as exc:

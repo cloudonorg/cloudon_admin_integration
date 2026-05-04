@@ -38,6 +38,29 @@ def _to_int_or_none(value: Any) -> int | None:
         return None
 
 
+def _first_present(item: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        if key in item and item.get(key) not in (None, ""):
+            return item.get(key)
+    return None
+
+
+def _normal_status(value: Any) -> str | None:
+    text = _norm(value)
+    return text.lower() if text else None
+
+
+def _infer_running_status(item: dict[str, Any], license_status: str | None) -> bool:
+    if item.get("active") is not None:
+        return bool(item.get("active"))
+    if item.get("is_running") is not None:
+        return bool(item.get("is_running"))
+    status = _normal_status(license_status or item.get("state") or item.get("license_state"))
+    if item.get("revoked_at") or item.get("license_revoked_at"):
+        return False
+    return status == "active"
+
+
 class AdminPanelClient:
     def __init__(self, cfg: IntegrationSettings):
         self.cfg = cfg
@@ -137,13 +160,34 @@ class AdminPanelClient:
             return None
         branch_code = _to_int_or_none(item.get("branch_code"))
         effective_config = dict(item)
-        license_to_date = _norm(item.get("license_valid_to") or item.get("license_to_date"))
-        license_status = _norm(item.get("license_status") or item.get("effective_entitlement"))
+        license_payload = item.get("license") if isinstance(item.get("license"), dict) else {}
+        license_to_date = _norm(
+            _first_present(
+                item,
+                (
+                    "license_valid_to",
+                    "license_to_date",
+                    "to_date",
+                    "valid_to",
+                    "expiration_date",
+                ),
+            )
+            or _first_present(license_payload, ("expiration_date", "valid_to", "to_date"))
+        )
+        license_status = _norm(
+            _first_present(item, ("license_status", "effective_entitlement", "state", "license_state"))
+            or _first_present(license_payload, ("status", "state"))
+        )
+        parameters = item.get("parameters")
+        if parameters is None:
+            parameters = item.get("params") or {}
+        is_running = _infer_running_status(item, license_status)
+        domain = _norm(item.get("infrastructure_domain") or item.get("domain"))
         return {
             "company_id": _norm(item.get("company_id")),
             "company_code": company_code,
             "company_name": _norm(item.get("company_name")),
-            "domain": _norm(item.get("infrastructure_domain")),
+            "domain": domain,
             "infrastructure_id": _norm(item.get("infrastructure_id")),
             "infrastructure_serial_num": _norm(item.get("infrastructure_serial_num")),
             "module_code": module_code,
@@ -155,18 +199,18 @@ class AdminPanelClient:
             "updated_at": _norm(item.get("updated_at")) or "",
             "deleted": bool(item.get("deleted")),
             "effective_config": effective_config,
-            "params": item.get("parameters") or {},
-            "is_running": bool(item.get("active")),
+            "params": parameters or {},
+            "is_running": is_running,
             "license_to_date": license_to_date,
             "license": {
                 "expiration_date": license_to_date,
                 "status": license_status,
-                "state": _norm(item.get("license_state")),
-                "revoked_at": _norm(item.get("license_revoked_at")),
-                "number_of_users": item.get("number_of_users"),
+                "state": _norm(item.get("license_state") or item.get("state") or license_payload.get("state")),
+                "revoked_at": _norm(item.get("license_revoked_at") or item.get("revoked_at") or license_payload.get("revoked_at")),
+                "number_of_users": item.get("number_of_users") or license_payload.get("number_of_users"),
             },
-            "state": _norm(item.get("license_state")),
-            "revoked_at": _norm(item.get("license_revoked_at")),
+            "state": _norm(item.get("license_state") or item.get("state") or license_payload.get("state")),
+            "revoked_at": _norm(item.get("license_revoked_at") or item.get("revoked_at") or license_payload.get("revoked_at")),
             "source": "admin_panel_effective_config",
             "metadata": {"from": "admin_panel_effective_config"},
         }

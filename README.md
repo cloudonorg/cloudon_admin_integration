@@ -6,8 +6,9 @@ It provides:
 - `POST /auth/token` for external API client authentication
 - local Redis cache for backend effective configs
 - bearer token validation for `api_client` tokens
+- header-scoped helpers for partner endpoints that use their own auth
 - dependency helpers for license and parameter checks
-- webhook sync routes for refresh/reconcile
+- webhook sync routes that apply backend payloads directly to Redis
 - consistent response envelope wiring
 
 ## External API Setup
@@ -125,6 +126,8 @@ from cloudon_admin_integration import (
     require_all_module_entitlements,
     require_module_parameters,
     require_module_parameters_for,
+    require_header_module_entitlement_for,
+    require_header_module_parameters_for,
     wire_integration,
 )
 from cloudon_admin_integration.config import settings as integration_settings
@@ -226,6 +229,41 @@ When no branch is present in the token or `X-Branch-Code`, parameter helpers ret
 ```
 
 When a branch is present in the token or `X-Branch-Code`, parameter helpers return only that branch's parameter dict.
+
+### Partner Or Header-Scoped Endpoints
+
+Use `require_header_module_entitlement_for("module_code")` or `require_header_module_parameters_for("module_code")`
+when the route authenticates the caller itself, for example with Basic Auth, and only wants Admin Panel
+Redis to answer whether the requested client has a running license and parameters.
+
+These helpers do not require a bearer token. They read the target from headers:
+
+- `X-Domain` or `domain`
+- `X-Company-Code` or `company`
+- `X-Branch-Code` or `branch`, optional
+
+```python
+from fastapi import Depends
+from fastapi.security import HTTPBasicCredentials
+from cloudon_admin_integration import (
+    EntitlementContext,
+    require_header_module_entitlement_for,
+)
+
+@app.get("/retail_zoom/day_transactions")
+async def retail_zoom_day_transactions(
+    credentials: HTTPBasicCredentials = Depends(partner_basic_auth),
+    entitlement: EntitlementContext = Depends(require_header_module_entitlement_for("retail_zoom")),
+):
+    return {
+        "company_code": entitlement.company_code,
+        "branch_code": entitlement.branch_code,
+        "parameters": entitlement.parameters,
+    }
+```
+
+The route remains responsible for authenticating the partner. The helper treats headers as the requested
+target and allows the request only when the local Redis entitlement for that module/company is active.
 
 ### Configured Module List
 
@@ -336,7 +374,7 @@ async def integration_settings_view():
 3. Backend returns a bearer token plus `effective_configs`.
 4. Integration stores normalized effective configs in Redis.
 5. Protected endpoints validate the bearer token and read license/parameter state from Redis.
-6. Backend notifications trigger refresh/reconcile; webhook payloads are treated as signals, not authoritative state.
+6. Backend sync events apply the effective-config payload directly to Redis.
 
 Example token request:
 
@@ -358,6 +396,7 @@ Optional scope headers:
 - `X-Company-Code`
 - `X-Infrastructure-Domain` or `X-Domain`
 - `X-Branch-Code`
+- Partner/header-scoped helpers also accept lowercase legacy headers `domain`, `company`, and `branch`.
 
 ## Exposed Endpoints
 
@@ -417,6 +456,8 @@ Single-module checks:
 - `require_module_entitlement_for(module_code)`: validates and returns `EntitlementContext` for an explicit module
 - `require_module_parameters`: validates and returns parameters for `APP_MODULE_CODE`
 - `require_module_parameters_for(module_code)`: validates and returns parameters for an explicit module
+- `require_header_module_entitlement_for(module_code)`: validates cached entitlement from headers, without bearer-token auth
+- `require_header_module_parameters_for(module_code)`: returns cached parameters from headers, without bearer-token auth
 
 Multi-module helpers:
 - `require_module_entitlements`: returns entitlements for `APP_MODULE_CODES`
@@ -446,7 +487,31 @@ The cache is disposable. If Redis is cleared, the external API can rebuild by ca
 Actual cache keys look like:
 
 ```text
-pharmacyone:integration:effective:{domain}:{company_code}:{module_code}:{branch_code_or_root}
+pharmacyone:integration:{module_code}:{domain}:{company_code}
+```
+
+The value is one JSON document for the company-level module entitlement. License state lives at the
+company/module level. Parameters can be flat company parameters or a branch container:
+
+```json
+{
+  "module_code": "retail_zoom",
+  "domain": "pharmacydemo",
+  "company_code": 10,
+  "is_running": true,
+  "license_to_date": "2026-12-31",
+  "params": {
+    "mode": "BRANCHES",
+    "master": {},
+    "branches": [
+      {
+        "branch_code": 101,
+        "branch_name": "Main",
+        "retail_zoom_enabled": true
+      }
+    ]
+  }
+}
 ```
 
 ## Troubleshooting
@@ -479,7 +544,7 @@ Check:
 - Redis contains keys like:
 
 ```text
-cloudon:integration:effective:{domain}:{company_code}:{module_code}:root
+cloudon:integration:{module_code}:{domain}:{company_code}
 ```
 
 ### Parameters are empty
@@ -494,6 +559,6 @@ Check:
 
 - backend remains authoritative
 - Redis is cache only
-- webhook payloads are notifications/triggers, not authoritative state
+- webhook payloads are applied directly when they include an effective config payload
 - old compatibility sync routes still exist
 - new deployments should use `/bootstrap/`, `/resolve/`, `/reconcile/`, and local Redis reads
