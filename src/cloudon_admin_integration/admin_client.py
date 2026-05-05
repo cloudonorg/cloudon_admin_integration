@@ -187,6 +187,9 @@ class AdminPanelClient:
             "company_id": _norm(item.get("company_id")),
             "company_code": company_code,
             "company_name": _norm(item.get("company_name")),
+            "application_id": _norm(item.get("application_id")),
+            "application_status": _norm(item.get("application_status")),
+            "application_expires_at": _norm(item.get("application_expires_at")),
             "domain": domain,
             "infrastructure_id": _norm(item.get("infrastructure_id")),
             "infrastructure_serial_num": _norm(item.get("infrastructure_serial_num")),
@@ -212,7 +215,12 @@ class AdminPanelClient:
             "state": _norm(item.get("license_state") or item.get("state") or license_payload.get("state")),
             "revoked_at": _norm(item.get("license_revoked_at") or item.get("revoked_at") or license_payload.get("revoked_at")),
             "source": "admin_panel_effective_config",
-            "metadata": {"from": "admin_panel_effective_config"},
+            "metadata": {
+                "from": "admin_panel_effective_config",
+                "application_id": _norm(item.get("application_id")),
+                "application_status": _norm(item.get("application_status")),
+                "application_expires_at": _norm(item.get("application_expires_at")),
+            },
         }
 
     def normalize_bootstrap_bundle(self, payload: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -234,6 +242,9 @@ class AdminPanelClient:
                         "company_id": _norm(company.get("id") or payload.get("company_id")),
                         "company_code": _to_int_or_none(company.get("code") or payload.get("company_code")),
                         "company_name": _norm(company.get("name") or payload.get("company_name")),
+                        "application_id": _norm(item.get("application_id")),
+                        "application_status": _norm(item.get("application_status")),
+                        "application_expires_at": _norm(item.get("application_expires_at")),
                         "domain": _norm(infrastructure.get("domain") or payload.get("infrastructure_domain")),
                         "infrastructure_id": _norm(infrastructure.get("id") or payload.get("infrastructure_id")),
                         "infrastructure_serial_num": _norm(infrastructure.get("serial_num") or payload.get("infrastructure_serial_num")),
@@ -275,7 +286,12 @@ class AdminPanelClient:
                         "state": _norm(license_payload.get("state")),
                         "revoked_at": _norm(license_payload.get("revoked_at")),
                         "source": "bootstrap_legacy_bundle",
-                        "metadata": {"from": "admin_panel_bootstrap_legacy_bundle"},
+                        "metadata": {
+                            "from": "admin_panel_bootstrap_legacy_bundle",
+                            "application_id": _norm(item.get("application_id")),
+                            "application_status": _norm(item.get("application_status")),
+                            "application_expires_at": _norm(item.get("application_expires_at")),
+                        },
                     }
                 )
 

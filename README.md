@@ -498,6 +498,9 @@ company/module level. Parameters can be flat company parameters or a branch cont
   "module_code": "retail_zoom",
   "domain": "pharmacydemo",
   "company_code": 10,
+  "application_id": "8d2f...",
+  "application_status": "RUNNING",
+  "application_expires_at": "2026-12-31",
   "is_running": true,
   "license_to_date": "2026-12-31",
   "params": {

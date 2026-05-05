@@ -143,6 +143,9 @@ class AdminPanelClientNormalizationTests(unittest.TestCase):
                     "company_id": "company-1",
                     "company_code": 2001,
                     "company_name": "Test Company",
+                    "application_id": "application-1",
+                    "application_status": "RUNNING",
+                    "application_expires_at": "2026-12-31",
                     "infrastructure_domain": "demo",
                     "module_code": "pharmacy_one",
                     "module_name": "Pharmacy One",
@@ -165,6 +168,9 @@ class AdminPanelClientNormalizationTests(unittest.TestCase):
 
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["module_code"], "pharmacy_one")
+        self.assertEqual(records[0]["application_id"], "application-1")
+        self.assertEqual(records[0]["application_status"], "RUNNING")
+        self.assertEqual(records[0]["metadata"]["application_id"], "application-1")
         self.assertEqual(records[0]["branch_code"], 10)
         self.assertEqual(records[0]["params"]["api_user"], "main")
         self.assertEqual(records[0]["version"], 42)

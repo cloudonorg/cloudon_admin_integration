@@ -20,6 +20,9 @@ sync_router = APIRouter(tags=["Integration Sync"])
 
 class SingleLicenseSyncPayload(BaseModel):
     operation: Literal["upsert", "delete"]
+    application_id: str | None = None
+    application_status: str | None = None
+    application_expires_at: str | None = None
     module_name: str | None = None
     module_code: str
     serial_num: str | None = None
@@ -55,6 +58,9 @@ class WebhookSyncPayload(BaseModel):
     event_type: str | None = None
     scope: str | None = None
     operation: Literal["upsert", "delete"] = "upsert"
+    application_id: str | None = None
+    application_status: str | None = None
+    application_expires_at: str | None = None
     company_id: str | None = None
     company_code: int | str | None = None
     company_name: str | None = None
@@ -145,6 +151,9 @@ async def _apply_legacy_payload(
                         payload.company_code or 0,
                         payload.module_code,
                         payload.params or {},
+                        application_id=payload.application_id,
+                        application_status=payload.application_status,
+                        application_expires_at=payload.application_expires_at,
                         company_id=payload.company_id,
                         infrastructure_id=payload.infrastructure_id,
                         infrastructure_serial_num=payload.infrastructure_serial_num,
@@ -179,6 +188,9 @@ async def _apply_legacy_payload(
                         payload.infrastructure_domain,
                         payload.company_code or 0,
                         payload.module_code,
+                        application_id=payload.application_id,
+                        application_status=payload.application_status,
+                        application_expires_at=payload.application_expires_at,
                         company_id=payload.company_id,
                         infrastructure_id=payload.infrastructure_id,
                         infrastructure_serial_num=payload.infrastructure_serial_num,
@@ -247,6 +259,9 @@ async def sync_single_license(
         result = await _apply_legacy_payload(
             WebhookSyncPayload(
                 operation=payload.operation,
+                application_id=payload.application_id,
+                application_status=payload.application_status,
+                application_expires_at=payload.application_expires_at,
                 company_id=payload.company_id,
                 company_code=payload.company_code,
                 company_name=payload.company_name,
