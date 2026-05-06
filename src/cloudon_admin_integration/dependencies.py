@@ -592,7 +592,7 @@ async def require_sync_key(
     cfg: IntegrationSettings = Depends(get_settings),
 ):
     if not cfg.sync_key:
-        _fail(500, "sync_key_missing", "SYNC_KEY is not configured")
+        _fail(500, "sync_key_missing", "ADMIN_PANEL_SYNC_KEY or SYNC_KEY is not configured")
     if x_sync_key and x_sync_key != cfg.sync_key:
         _fail(401, "sync_key_invalid", "Invalid X-Sync-Key")
     if x_sync_timestamp and x_sync_signature:

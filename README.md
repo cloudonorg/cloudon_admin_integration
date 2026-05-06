@@ -49,6 +49,9 @@ REDIS_PORT="6379"
 REDIS_DB="0"
 REDIS_PASSWORD=""
 REDIS_KEY_PREFIX="cloudon:integration"
+
+# Admin-panel webhook auth for /sync-redis-data
+ADMIN_PANEL_SYNC_KEY="change_me"
 ```
 
 Module notes:
@@ -62,6 +65,8 @@ Security notes:
 - with `RS256`, external APIs should only receive the public key
 - do not set `ADMIN_PANEL_JWT_SIGNING_KEY` on external APIs
 - inside Docker, `localhost` is the API container itself; use `REDIS_HOST=redis` when the Redis service is named `redis`
+- `ADMIN_PANEL_SYNC_KEY` must match the admin backend `SYNC_KEY` exactly so webhook cache refresh requests are accepted
+- `SYNC_KEY` is still supported as a fallback for older integrations, but new APIs should use `ADMIN_PANEL_SYNC_KEY` in `.env.admin-panel`
 
 ### 3. Docker Compose
 
@@ -413,8 +418,12 @@ Sync endpoints:
 If sync routes are used, set a shared webhook secret:
 
 ```env
-SYNC_KEY="change_me"
+ADMIN_PANEL_SYNC_KEY="change_me"
 ```
+
+It must match the backend admin-panel `SYNC_KEY` exactly. If the external API does not define it, `/sync-redis-data`
+will reject or fail webhook cache refresh requests. Older projects may still use `SYNC_KEY`, but `.env.admin-panel`
+with `ADMIN_PANEL_SYNC_KEY` is the preferred setup.
 
 ## Optional Startup Sync
 

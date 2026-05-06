@@ -90,7 +90,11 @@ class IntegrationSettings:
             admin_panel_client_secret=(os.getenv("ADMIN_PANEL_CLIENT_SECRET") or "").strip() or None,
             http_timeout_seconds=float(os.getenv("HTTP_TIMEOUT_SECONDS") or 10),
             sync_on_startup=_as_bool(os.getenv("SYNC_ON_STARTUP"), False),
-            sync_key=(os.getenv("SYNC_KEY") or "").strip() or None,
+            sync_key=(
+                (os.getenv("ADMIN_PANEL_SYNC_KEY") or "").strip()
+                or (os.getenv("SYNC_KEY") or "").strip()
+                or None
+            ),
             redis_host=(os.getenv("REDIS_HOST") or "localhost").strip(),
             redis_port=int(os.getenv("REDIS_PORT") or 6379),
             redis_db=int(os.getenv("REDIS_DB") or 0),
