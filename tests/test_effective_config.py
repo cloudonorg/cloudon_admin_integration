@@ -1,11 +1,15 @@
 import unittest
 from datetime import date, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+
+import httpx
 
 from cloudon_admin_integration.admin_client import AdminPanelClient
 from cloudon_admin_integration.config import IntegrationSettings
 from cloudon_admin_integration.dependencies import (
     _build_module_parameters_payload,
+    _require_header_module_entitlement,
     _require_header_module_parameters_payload,
     _require_module_parameters_payload,
 )
@@ -416,6 +420,45 @@ class ModuleParameterDependencyTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(params, {"branch_code": 101, "retail_zoom_enabled": True})
+
+    async def test_header_scope_falls_back_to_company_refresh_when_branch_refresh_404s(self):
+        refreshed = _effective_record(
+            None,
+            {
+                "mode": "BRANCHES",
+                "master": {"enabled": True},
+                "branches": [{"branch_code": 101, "retail_zoom_enabled": True}],
+            },
+            module_code="retail_zoom",
+        )
+        branch_404 = httpx.HTTPStatusError(
+            "not found",
+            request=httpx.Request("POST", "https://admin.example.com/api/client-auth/effective-configs/resolve/"),
+            response=httpx.Response(404),
+        )
+
+        with patch(
+            "cloudon_admin_integration.dependencies.settings",
+            SimpleNamespace(admin_panel_client_id="svc-client", admin_panel_client_secret="svc-secret"),
+        ), patch(
+            "cloudon_admin_integration.dependencies.refresh_effective_config",
+            new=AsyncMock(side_effect=[branch_404, refreshed]),
+        ) as refresh_mock:
+            entitlement = await _require_header_module_entitlement(
+                _Request(headers={"domain": "pocyfuse", "company": "10", "branch": "101"}),
+                _Cache([]),
+                _Settings(),
+                module_code="retail_zoom",
+            )
+
+        self.assertEqual(refresh_mock.await_count, 2)
+        first_call = refresh_mock.await_args_list[0]
+        second_call = refresh_mock.await_args_list[1]
+        self.assertEqual(first_call.args[0], "retail_zoom")
+        self.assertEqual(first_call.kwargs["branch_code"], 101)
+        self.assertEqual(second_call.kwargs["branch_code"], None)
+        self.assertEqual(entitlement.company_code, 10)
+        self.assertEqual(entitlement.branch_code, 101)
 
 
 if __name__ == "__main__":

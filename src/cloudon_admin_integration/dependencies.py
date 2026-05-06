@@ -493,6 +493,20 @@ async def _refresh_scope_record(
         )
     except httpx.HTTPStatusError as exc:
         if exc.response is not None and exc.response.status_code == 404:
+            if scope.branch_code is not None:
+                try:
+                    return await refresh_effective_config(
+                        module_code,
+                        branch_code=None,
+                        client_id=client_id,
+                        client_secret=client_secret,
+                        cache=cache,
+                        admin_client=admin_client,
+                    )
+                except httpx.HTTPStatusError as fallback_exc:
+                    if fallback_exc.response is not None and fallback_exc.response.status_code == 404:
+                        return None
+                    raise
             return None
         raise
 
