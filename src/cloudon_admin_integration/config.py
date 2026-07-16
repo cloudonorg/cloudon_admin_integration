@@ -3,8 +3,11 @@ from dataclasses import dataclass
 
 
 DEFAULT_CLIENT_BOOTSTRAP_PATH = "/api/client-auth/bootstrap/"
+DEFAULT_CLIENT_TOKEN_PATH = "/api/client-auth/token/"
 DEFAULT_EFFECTIVE_CONFIG_RESOLVE_PATH = "/api/client-auth/effective-configs/resolve/"
 DEFAULT_EFFECTIVE_CONFIG_RECONCILE_PATH = "/api/client-auth/effective-configs/reconcile/"
+DEFAULT_SYSTEM_LOG_INGEST_PATH = "/api/system-logs/ingest/"
+DEFAULT_SYSTEM_LOG_INGEST_BULK_PATH = "/api/system-logs/ingest-bulk/"
 
 
 def _as_bool(value: str | None, default: bool) -> bool:
@@ -39,8 +42,11 @@ class IntegrationSettings:
     app_module_codes: tuple[str, ...]
     admin_panel_base_url: str
     admin_panel_client_bootstrap_path: str
+    admin_panel_client_token_path: str
     admin_panel_effective_config_resolve_path: str
     admin_panel_effective_config_reconcile_path: str
+    admin_panel_system_log_ingest_path: str
+    admin_panel_system_log_ingest_bulk_path: str
     admin_panel_client_id: str | None
     admin_panel_client_secret: str | None
     http_timeout_seconds: float
@@ -80,11 +86,20 @@ class IntegrationSettings:
             admin_panel_client_bootstrap_path=(
                 os.getenv("ADMIN_PANEL_CLIENT_BOOTSTRAP_PATH") or DEFAULT_CLIENT_BOOTSTRAP_PATH
             ).strip(),
+            admin_panel_client_token_path=(
+                os.getenv("ADMIN_PANEL_CLIENT_TOKEN_PATH") or DEFAULT_CLIENT_TOKEN_PATH
+            ).strip(),
             admin_panel_effective_config_resolve_path=(
                 os.getenv("ADMIN_PANEL_EFFECTIVE_CONFIG_RESOLVE_PATH") or DEFAULT_EFFECTIVE_CONFIG_RESOLVE_PATH
             ).strip(),
             admin_panel_effective_config_reconcile_path=(
                 os.getenv("ADMIN_PANEL_EFFECTIVE_CONFIG_RECONCILE_PATH") or DEFAULT_EFFECTIVE_CONFIG_RECONCILE_PATH
+            ).strip(),
+            admin_panel_system_log_ingest_path=(
+                os.getenv("ADMIN_PANEL_SYSTEM_LOG_INGEST_PATH") or DEFAULT_SYSTEM_LOG_INGEST_PATH
+            ).strip(),
+            admin_panel_system_log_ingest_bulk_path=(
+                os.getenv("ADMIN_PANEL_SYSTEM_LOG_INGEST_BULK_PATH") or DEFAULT_SYSTEM_LOG_INGEST_BULK_PATH
             ).strip(),
             admin_panel_client_id=(os.getenv("ADMIN_PANEL_CLIENT_ID") or "").strip() or None,
             admin_panel_client_secret=(os.getenv("ADMIN_PANEL_CLIENT_SECRET") or "").strip() or None,

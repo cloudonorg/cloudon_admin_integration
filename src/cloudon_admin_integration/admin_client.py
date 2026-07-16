@@ -71,6 +71,7 @@ class AdminPanelClient:
         path: str,
         *,
         json_body: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> Any:
         timeout = httpx.Timeout(self.cfg.http_timeout_seconds)
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -78,9 +79,55 @@ class AdminPanelClient:
                 method,
                 self.cfg.admin_url(path),
                 json=json_body,
+                headers=headers,
             )
             response.raise_for_status()
             return response.json()
+
+    async def issue_client_token(
+        self,
+        client_id: str | None = None,
+        client_secret: str | None = None,
+        *,
+        branch_code: str | None = None,
+        module_code: str | None = None,
+    ) -> dict[str, Any]:
+        client_id = (client_id or self.cfg.admin_panel_client_id or "").strip() or None
+        client_secret = (client_secret or self.cfg.admin_panel_client_secret or "").strip() or None
+        if not client_id or not client_secret:
+            raise httpx.HTTPError("client_id and client_secret are required for token issue")
+        payload = {
+            "client_id": client_id,
+            "client_secret": client_secret,
+        }
+        if _norm(branch_code):
+            payload["branch_code"] = _norm(branch_code)
+        if _norm(module_code):
+            payload["module_code"] = _norm(module_code)
+        data = await self._request_json("POST", self.cfg.admin_panel_client_token_path, json_body=payload)
+        if not isinstance(data, dict):
+            raise httpx.HTTPError("Unexpected token response shape")
+        return data
+
+    async def _client_auth_headers(
+        self,
+        *,
+        client_id: str | None = None,
+        client_secret: str | None = None,
+        branch_code: str | None = None,
+        module_code: str | None = None,
+    ) -> dict[str, str]:
+        token_payload = await self.issue_client_token(
+            client_id=client_id,
+            client_secret=client_secret,
+            branch_code=branch_code,
+            module_code=module_code,
+        )
+        access = _norm(token_payload.get("access"))
+        token_type = _norm(token_payload.get("token_type")) or "Bearer"
+        if not access:
+            raise httpx.HTTPError("Token response did not include access token")
+        return {"Authorization": f"{token_type} {access}"}
 
     async def bootstrap_client_bundle(
         self,
@@ -152,6 +199,56 @@ class AdminPanelClient:
         if not isinstance(data, dict):
             raise httpx.HTTPError("Unexpected reconcile response shape")
         return data
+
+    async def send_log(
+        self,
+        event: dict[str, Any],
+        *,
+        client_id: str | None = None,
+        client_secret: str | None = None,
+        branch_code: str | None = None,
+        module_code: str | None = None,
+    ) -> dict[str, Any]:
+        headers = await self._client_auth_headers(
+            client_id=client_id,
+            client_secret=client_secret,
+            branch_code=branch_code,
+            module_code=module_code,
+        )
+        payload = await self._request_json(
+            "POST",
+            self.cfg.admin_panel_system_log_ingest_path,
+            json_body=event,
+            headers=headers,
+        )
+        if not isinstance(payload, dict):
+            raise httpx.HTTPError("Unexpected log ingest response shape")
+        return payload
+
+    async def send_logs(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        client_id: str | None = None,
+        client_secret: str | None = None,
+        branch_code: str | None = None,
+        module_code: str | None = None,
+    ) -> dict[str, Any]:
+        headers = await self._client_auth_headers(
+            client_id=client_id,
+            client_secret=client_secret,
+            branch_code=branch_code,
+            module_code=module_code,
+        )
+        payload = await self._request_json(
+            "POST",
+            self.cfg.admin_panel_system_log_ingest_bulk_path,
+            json_body={"events": events},
+            headers=headers,
+        )
+        if not isinstance(payload, dict):
+            raise httpx.HTTPError("Unexpected bulk log ingest response shape")
+        return payload
 
     def _normalize_effective_config(self, item: dict[str, Any]) -> dict[str, Any] | None:
         module_code = _norm(item.get("module_code") or item.get("module"))
