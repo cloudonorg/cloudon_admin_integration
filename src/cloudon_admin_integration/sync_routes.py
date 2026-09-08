@@ -371,6 +371,7 @@ async def get_redis_data(
     branch_code: str | None = Query(default=None),
     domain: str | None = Query(default=None),
     refresh: bool = Query(default=False),
+    all_companies: bool = Query(default=False),
     cache: IntegrationCache = Depends(get_cache),
 ):
     if refresh:
@@ -380,6 +381,20 @@ async def get_redis_data(
             raise HTTPException(status_code=502, detail=f"Admin panel sync failed: {exc}") from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=f"Cache unavailable: {exc}") from exc
+    # Unfiltered, this returns every tenant this middleware has ever cached. Make
+    # a fleet-wide dump an explicit request rather than the default.
+    scoped = any(value is not None for value in (company_id, company_code, module_code, domain))
+    if not scoped and not all_companies:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "reason": "scope_required",
+                "message": (
+                    "Filter by company_id, company_code, module_code or domain, "
+                    "or pass all_companies=true to dump every cached tenant."
+                ),
+            },
+        )
     try:
         data = await cache.dump(
             company_id=company_id,

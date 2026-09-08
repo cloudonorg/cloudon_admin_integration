@@ -1,5 +1,21 @@
 # cloudon-admin-integration
 
+> **Upgrading**
+>
+> `wire_integration(app)` no longer publishes `POST /auth/token` or
+> `GET /admin/parameters`. If your service needs them, pass
+> `include_auth_routes=True` / `include_admin_routes=True`. The sync webhook
+> routes are still registered by default.
+>
+> `GET /get-redis-data` now returns 400 unless you filter by `company_id`,
+> `company_code`, `module_code` or `domain`, or pass `all_companies=true`.
+> Unscoped, it returned every tenant the middleware had cached.
+>
+> Entitlement reads are served from Redis. The admin panel is consulted only when
+> a record is missing or stale, so `RECONCILE_INTERVAL_SECONDS` (default 300)
+> now drives a background delta sync instead of a call per request. Set it to 0
+> to disable the loop.
+
 Reusable FastAPI integration layer for CloudOn Admin Panel.
 
 It provides:

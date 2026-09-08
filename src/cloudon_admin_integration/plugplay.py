@@ -84,8 +84,26 @@ def wire_integration(
     app: FastAPI,
     *,
     include_sync_routes: bool = True,
+    include_auth_routes: bool = False,
+    include_admin_routes: bool = False,
     include_response_envelope: bool = True,
 ) -> None:
+    """Attach the integration layer to a FastAPI app.
+
+    A bare wire_integration(app) used to publish /auth/token, /admin/parameters
+    and the sync router all at once. One consumer stripped them again by rewriting
+    app.router.routes; another left them exposed. The two endpoints that are
+    incidental now default to off, and publishing them is a deliberate choice:
+
+    include_auth_routes    POST /auth/token, which mints client tokens.
+    include_admin_routes   GET /admin/parameters, which returns every entitlement
+                           for the calling company.
+
+    include_sync_routes stays on: those are the webhook endpoints the backend
+    delivers changes to, they are the reason a service installs this package, and
+    they are guarded by the sync key. GET /get-redis-data now refuses an
+    unscoped fleet-wide dump unless the caller asks for one explicitly.
+    """
     if include_response_envelope and settings.integration_wrap_responses:
         wire_response_envelope(app, excluded_paths=set(settings.integration_excluded_paths))
 
@@ -97,9 +115,10 @@ def wire_integration(
     async def _integration_shutdown() -> None:
         await shutdown_integration()
 
-    _register_auth_routes(app)
-    _register_admin_routes(app)
-
+    if include_auth_routes:
+        _register_auth_routes(app)
+    if include_admin_routes:
+        _register_admin_routes(app)
     if include_sync_routes:
         app.include_router(sync_router)
 
