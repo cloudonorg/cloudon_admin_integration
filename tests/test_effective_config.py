@@ -474,8 +474,11 @@ class _FakeRedis:
     def __init__(self):
         self.strings = {}
         self.sets = {}
+        self.get_calls = 0
+        self.mget_calls = 0
 
     async def get(self, key):
+        self.get_calls += 1
         return self.strings.get(key)
 
     async def set(self, key, value):
@@ -492,6 +495,10 @@ class _FakeRedis:
 
     async def smembers(self, key):
         return set(self.sets.get(key, set()))
+
+    async def mget(self, keys):
+        self.mget_calls += 1
+        return [self.strings.get(k) for k in keys]
 
 
 def _cache_with_fake_redis():
@@ -788,3 +795,123 @@ class RedisPrefixNormalizationTests(unittest.TestCase):
 
         self.assertEqual(key, "admin_panel:pharmacy_one:tenant-a:2001")
         self.assertNotIn("::", key)
+
+
+class ListEntitlementsEfficiencyTests(unittest.IsolatedAsyncioTestCase):
+    """Listing reads in one round-trip and skips keys it can rule out (I12)."""
+
+    async def _seeded(self, n_companies=5):
+        cache = _cache_with_fake_redis()
+        for i in range(n_companies):
+            await cache.upsert_effective_config(_record(company_code=2000 + i, module_code="pharmacy_one"))
+            await cache.upsert_effective_config(_record(company_code=2000 + i, module_code="rapid_test"))
+        cache.redis.get_calls = 0
+        cache.redis.mget_calls = 0
+        return cache
+
+    async def test_listing_uses_a_single_mget(self):
+        cache = await self._seeded()
+
+        rows = await cache.list_entitlements()
+
+        self.assertEqual(len(rows), 10)
+        self.assertEqual(cache.redis.mget_calls, 1)
+        self.assertEqual(cache.redis.get_calls, 0)
+
+    async def test_company_filter_narrows_before_fetching(self):
+        cache = await self._seeded()
+
+        rows = await cache.list_entitlements(company_code=2003)
+
+        self.assertEqual({r["company_code"] for r in rows}, {2003})
+        self.assertEqual(len(rows), 2)
+
+    async def test_module_filter_narrows_before_fetching(self):
+        cache = await self._seeded()
+
+        rows = await cache.list_entitlements(module_code="rapid_test")
+
+        self.assertEqual({r["module_code"] for r in rows}, {"rapid_test"})
+        self.assertEqual(len(rows), 5)
+
+    async def test_combined_filters_return_one_row(self):
+        cache = await self._seeded()
+
+        rows = await cache.list_entitlements(company_code=2001, module_code="pharmacy_one", domain="sync-tenant")
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["company_code"], 2001)
+
+    async def test_domain_mismatch_returns_nothing(self):
+        cache = await self._seeded()
+
+        self.assertEqual(await cache.list_entitlements(domain="other-tenant"), [])
+
+    async def test_empty_cache_makes_no_calls(self):
+        cache = _cache_with_fake_redis()
+
+        self.assertEqual(await cache.list_entitlements(), [])
+        self.assertEqual(cache.redis.mget_calls, 0)
+
+
+class ResponseEnvelopeHeaderTests(unittest.TestCase):
+    """The envelope must not lose what the route set (I13)."""
+
+    def _app(self):
+        from fastapi import FastAPI
+        from fastapi.responses import JSONResponse, StreamingResponse
+        from cloudon_admin_integration.responses import wire_response_envelope
+
+        app = FastAPI()
+        wire_response_envelope(app, excluded_paths={"/raw"})
+
+        @app.get("/with-headers")
+        def with_headers():
+            return JSONResponse(
+                {"value": 1},
+                headers={"X-Total-Count": "42", "Set-Cookie": "session=abc; Path=/"},
+            )
+
+        @app.get("/stream")
+        def stream():
+            def gen():
+                yield b'{"a":1}\n'
+                yield b'{"a":2}\n'
+            return StreamingResponse(gen(), media_type="application/x-ndjson")
+
+        @app.get("/plain")
+        def plain():
+            return {"ok": True}
+
+        return app
+
+    def _client(self):
+        from fastapi.testclient import TestClient
+
+        return TestClient(self._app())
+
+    def test_route_headers_survive_the_envelope(self):
+        r = self._client().get("/with-headers")
+
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["data"], {"value": 1})
+        # Previously the envelope built a fresh response and dropped these.
+        self.assertEqual(r.headers.get("x-total-count"), "42")
+        self.assertIn("session=abc", r.headers.get("set-cookie", ""))
+
+    def test_content_length_is_not_carried_from_the_original_body(self):
+        r = self._client().get("/with-headers")
+
+        self.assertEqual(int(r.headers["content-length"]), len(r.content))
+
+    def test_streaming_responses_pass_through_unwrapped(self):
+        r = self._client().get("/stream")
+
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.text, '{"a":1}\n{"a":2}\n')
+
+    def test_plain_json_is_still_wrapped(self):
+        body = self._client().get("/plain").json()
+
+        self.assertTrue(body["success"])
+        self.assertEqual(body["data"], {"ok": True})

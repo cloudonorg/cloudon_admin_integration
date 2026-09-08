@@ -111,6 +111,17 @@ def normalize_response_payload(payload: Any, status_code: int, *, default_messag
     return response_envelope(success=True, error=None, message=default_message, data=payload)
 
 
+def _carried_headers(response) -> dict[str, str]:
+    """Headers to copy onto the replacement response.
+
+    The envelope replaces the response object, which previously dropped everything
+    the route had set — Set-Cookie, CORS headers, cache directives, custom headers.
+    Length and encoding are excluded because the new body has its own.
+    """
+    dropped = {"content-length", "content-type", "content-encoding", "transfer-encoding"}
+    return {k: v for k, v in response.headers.items() if k.lower() not in dropped}
+
+
 def wire_response_envelope(app: FastAPI, *, excluded_paths: set[str] | None = None) -> None:
     excluded = excluded_paths or {"/docs", "/redoc", "/openapi.json", "/favicon.ico"}
 
@@ -164,6 +175,14 @@ def wire_response_envelope(app: FastAPI, *, excluded_paths: set[str] | None = No
         if "application/json" not in content_type:
             return response
 
+        # Streaming and event-stream responses must not be buffered: consuming the
+        # iterator here would hold the whole body in memory and break incremental
+        # delivery. They are passed through untouched.
+        if "text/event-stream" in content_type or "x-ndjson" in content_type:
+            return response
+        if response.headers.get("content-disposition"):
+            return response
+
         body_bytes = b""
         async for chunk in response.body_iterator:
             body_bytes += chunk
@@ -182,7 +201,12 @@ def wire_response_envelope(app: FastAPI, *, excluded_paths: set[str] | None = No
                         message=default_message if response.status_code < 400 else "Non-JSON response body",
                         data=body_bytes.decode("utf-8", errors="replace") if response.status_code < 400 else None,
                     ),
+                    headers=_carried_headers(response),
                 )
             normalized = normalize_response_payload(payload, response.status_code, default_message=default_message)
 
-        return JSONResponse(status_code=response.status_code, content=normalized)
+        return JSONResponse(
+            status_code=response.status_code,
+            content=normalized,
+            headers=_carried_headers(response),
+        )

@@ -144,6 +144,50 @@ class IntegrationCache:
             raise RuntimeError("Redis client is not connected")
         return self.redis
 
+    def _key_may_match(
+        self,
+        key: str,
+        *,
+        company_code: str | int | None,
+        module_codes: set[str],
+        domain: str | None,
+    ) -> bool:
+        """Cheap pre-filter on the key name.
+
+        Current keys are "<prefix>:<module>:<domain>:<company>". Legacy keys use a
+        different layout, so they always pass here and are filtered on their
+        contents instead.
+        """
+        if self._is_legacy_key(key):
+            return True
+        prefix = f"{self.cfg.redis_key_prefix}:"
+        if not key.startswith(prefix):
+            return True
+        parts = key[len(prefix):].split(":")
+        if len(parts) != 3:
+            return True
+        key_module, key_domain, key_company = parts
+        if module_codes and key_module not in module_codes:
+            return False
+        if domain is not None and key_domain != str(domain):
+            return False
+        if company_code is not None and key_company != str(company_code):
+            return False
+        return True
+
+    @staticmethod
+    def _decode_record(key: str, raw: Any) -> dict[str, Any] | None:
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        data["_cache_key"] = key
+        return data
+
     async def _get_record_by_key(self, key: str) -> dict[str, Any] | None:
         redis_conn = self._ensure()
         raw = await redis_conn.get(key)
@@ -477,9 +521,25 @@ class IntegrationCache:
         redis_conn = self._ensure()
         keys = sorted(await redis_conn.smembers(self._index_key))
         module_codes = set(self._normalize_codes(module_code))
+
+        # The key already encodes module, domain and company, so most rows can be
+        # excluded on the key name alone — no fetch needed. Legacy keys have a
+        # different layout and are always kept for the record-level filters below.
+        keys = [
+            key
+            for key in keys
+            if self._key_may_match(
+                str(key), company_code=company_code, module_codes=module_codes, domain=domain
+            )
+        ]
+
+        # One MGET instead of a GET per key. On a middleware holding a few hundred
+        # company/module pairs that was a few hundred sequential round-trips per
+        # request.
         rows: list[dict[str, Any]] = []
-        for key in keys:
-            record = await self._get_record_by_key(key)
+        raw_values = await redis_conn.mget(keys) if keys else []
+        for key, raw in zip(keys, raw_values):
+            record = self._decode_record(str(key), raw)
             if not record:
                 continue
             if company_id is not None and str(record.get("company_id")) != str(company_id):
