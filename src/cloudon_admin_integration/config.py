@@ -68,6 +68,9 @@ class IntegrationSettings:
     require_module_params: bool
     license_expiry_warning_days: int
     cache_stale_after_seconds: int
+    # Defaulted so adding settings does not break callers that build this
+    # explicitly (tests, and any consumer constructing it by hand).
+    reconcile_interval_seconds: int = 300
 
     @classmethod
     def from_env(cls) -> "IntegrationSettings":
@@ -131,6 +134,9 @@ class IntegrationSettings:
             require_module_params=_as_bool(os.getenv("REQUIRE_MODULE_PARAMS"), False),
             license_expiry_warning_days=int(os.getenv("LICENSE_EXPIRY_WARNING_DAYS") or 10),
             cache_stale_after_seconds=int(os.getenv("CACHE_STALE_AFTER_SECONDS") or 3600),
+            # Background delta-sync cadence. 0 disables the loop, leaving the cache
+            # to be refreshed by backend pushes and on-demand staleness refreshes.
+            reconcile_interval_seconds=int(os.getenv("RECONCILE_INTERVAL_SECONDS") or 300),
         )
 
     def admin_url(self, path: str) -> str:

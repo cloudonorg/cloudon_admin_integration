@@ -1,5 +1,5 @@
 import unittest
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone as dt_timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -624,3 +624,129 @@ class VersionMonotonicityTests(unittest.IsolatedAsyncioTestCase):
         branches = stored["params"]["branches"]
         self.assertEqual([b["branch_code"] for b in branches], [100])
         self.assertEqual(cache.stale_writes_rejected, 0)
+
+
+class ReadPathTests(unittest.IsolatedAsyncioTestCase):
+    """Redis is the read path; the admin panel is only consulted when it has to be (I4)."""
+
+    def _scope(self):
+        from cloudon_admin_integration.dependencies import _ResolvedEntitlementScope
+
+        return _ResolvedEntitlementScope(
+            client_id="c1",
+            company_id="company-a",
+            company_code=2001,
+            domain="tenant-a",
+            branch_code=None,
+            session={"client_secret": "s3cret", "client_id": "c1"},
+        )
+
+    def _cache_with(self, record):
+        class _C:
+            async def get_entitlement(self, *a, **k):
+                return record
+
+        return _C()
+
+    async def test_fresh_cached_record_skips_the_backend(self):
+        from cloudon_admin_integration.dependencies import _get_effective_record
+
+        fresh = _record(version=5)
+        fresh["stale_at"] = (
+            datetime.now(dt_timezone.utc) + timedelta(hours=1)
+        ).isoformat().replace("+00:00", "Z")
+
+        with patch(
+            "cloudon_admin_integration.dependencies._refresh_scope_record", new_callable=AsyncMock
+        ) as refresh:
+            got = await _get_effective_record(self._scope(), "pharmacy_one", cache=self._cache_with(fresh))
+
+        refresh.assert_not_awaited()
+        self.assertEqual(got["version"], 5)
+
+    async def test_record_without_stale_at_is_treated_as_fresh(self):
+        from cloudon_admin_integration.dependencies import _get_effective_record
+
+        with patch(
+            "cloudon_admin_integration.dependencies._refresh_scope_record", new_callable=AsyncMock
+        ) as refresh:
+            got = await _get_effective_record(
+                self._scope(), "pharmacy_one", cache=self._cache_with(_record(version=7))
+            )
+
+        refresh.assert_not_awaited()
+        self.assertEqual(got["version"], 7)
+
+    async def test_stale_record_triggers_a_refresh(self):
+        from cloudon_admin_integration.dependencies import _get_effective_record
+
+        stale = _record(version=1)
+        stale["stale_at"] = (
+            datetime.now(dt_timezone.utc) - timedelta(hours=1)
+        ).isoformat().replace("+00:00", "Z")
+
+        with patch(
+            "cloudon_admin_integration.dependencies._refresh_scope_record", new_callable=AsyncMock
+        ) as refresh:
+            refresh.return_value = _record(version=9)
+            got = await _get_effective_record(self._scope(), "pharmacy_one", cache=self._cache_with(stale))
+
+        refresh.assert_awaited_once()
+        self.assertEqual(got["version"], 9)
+
+    async def test_missing_record_triggers_a_refresh(self):
+        from cloudon_admin_integration.dependencies import _get_effective_record
+
+        with patch(
+            "cloudon_admin_integration.dependencies._refresh_scope_record", new_callable=AsyncMock
+        ) as refresh:
+            refresh.return_value = _record(version=3)
+            got = await _get_effective_record(self._scope(), "pharmacy_one", cache=self._cache_with(None))
+
+        refresh.assert_awaited_once()
+        self.assertEqual(got["version"], 3)
+
+    async def test_stale_record_is_served_when_the_backend_is_down(self):
+        from cloudon_admin_integration.dependencies import _get_effective_record
+
+        stale = _record(version=1)
+        stale["stale_at"] = (
+            datetime.now(dt_timezone.utc) - timedelta(hours=1)
+        ).isoformat().replace("+00:00", "Z")
+
+        with patch(
+            "cloudon_admin_integration.dependencies._refresh_scope_record", new_callable=AsyncMock
+        ) as refresh:
+            refresh.side_effect = httpx.HTTPError("panel unreachable")
+            got = await _get_effective_record(self._scope(), "pharmacy_one", cache=self._cache_with(stale))
+
+        # Better to honour an entitlement that was valid an hour ago than to refuse
+        # a request the customer has paid for.
+        self.assertEqual(got["version"], 1)
+
+
+class StalenessTimezoneTests(unittest.TestCase):
+    """stale_at is compared in UTC regardless of the host's timezone (I8)."""
+
+    def test_future_utc_stamp_is_not_stale(self):
+        from cloudon_admin_integration.dependencies import _record_is_stale
+
+        future = (datetime.now(dt_timezone.utc) + timedelta(minutes=30)).isoformat().replace("+00:00", "Z")
+        self.assertFalse(_record_is_stale({"stale_at": future}))
+
+    def test_past_utc_stamp_is_stale(self):
+        from cloudon_admin_integration.dependencies import _record_is_stale
+
+        past = (datetime.now(dt_timezone.utc) - timedelta(minutes=30)).isoformat().replace("+00:00", "Z")
+        self.assertTrue(_record_is_stale({"stale_at": past}))
+
+    def test_naive_stamp_is_read_as_utc(self):
+        from cloudon_admin_integration.dependencies import _record_is_stale
+
+        naive_past = (datetime.now(dt_timezone.utc) - timedelta(hours=2)).replace(tzinfo=None).isoformat()
+        self.assertTrue(_record_is_stale({"stale_at": naive_past}))
+
+    def test_missing_stamp_is_not_stale(self):
+        from cloudon_admin_integration.dependencies import _record_is_stale
+
+        self.assertFalse(_record_is_stale({}))

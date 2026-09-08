@@ -1,8 +1,9 @@
+import asyncio
 import hashlib
 import hmac
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections.abc import Sequence
 from typing import Any
 
@@ -372,7 +373,7 @@ def _validate_entitlement_record(
         _fail(403, "params_not_found", "Parameters not found for this module")
     license_date = parse_date_or_none(record.get("license_to_date"))
     if license_date:
-        days_left = (license_date - datetime.utcnow().date()).days
+        days_left = (license_date - datetime.now(timezone.utc).date()).days
         if 0 <= days_left <= cfg.license_expiry_warning_days:
             request.state.integration_message = _license_warning_message(days_left)
 
@@ -496,16 +497,26 @@ def _parse_iso_datetime(value: Any) -> datetime | None:
         parsed = datetime.fromisoformat(raw)
     except ValueError:
         return None
-    if parsed.tzinfo is not None:
-        return parsed.astimezone().replace(tzinfo=None)
-    return parsed
+    # Always return an aware UTC datetime. The previous version converted to local
+    # time and stripped the tzinfo, then compared against a UTC clock — off by the
+    # host's UTC offset, so on Europe/Athens the freshness window was wrong by two
+    # or three hours depending on DST.
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _record_is_stale(record: dict[str, Any]) -> bool:
+    """Whether a cached record has passed its freshness window.
+
+    A record with no stale_at is treated as fresh: it predates the field, and
+    refusing to serve it would mean falling back to the admin panel on every
+    request, which is exactly what this check exists to avoid.
+    """
     stale_at = _parse_iso_datetime(record.get("stale_at"))
     if stale_at is None:
         return False
-    return stale_at <= datetime.utcnow()
+    return stale_at <= datetime.now(timezone.utc)
 
 
 def _scope_client_credentials(scope: _ResolvedEntitlementScope) -> tuple[str | None, str | None]:
@@ -562,16 +573,35 @@ async def _get_effective_record(
     admin_client: AdminPanelClient | None = None,
 ) -> dict[str, Any] | None:
     cached = await cache.get_entitlement(scope.domain, scope.company_code, module_code, scope.branch_code)
-    refreshable = bool((scope.session or {}).get("client_secret")) or bool(settings.admin_panel_client_secret)
-    if refreshable:
-        try:
-            refreshed = await _refresh_scope_record(scope, module_code, cache=cache, admin_client=admin_client)
-            if refreshed is not None:
-                return refreshed
-        except Exception as exc:
-            logger.warning("Runtime refresh failed for company=%s module=%s branch=%s: %s", scope.company_code, module_code, scope.branch_code, exc)
+
+    # Redis is the read path. The backend pushes every change here over the sync
+    # pipeline, so a present, fresh record is authoritative and needs no network
+    # call. Previously this refreshed from the admin panel on *every* request and
+    # only fell back to the cache when that failed, which put an HTTP round-trip
+    # and a PBKDF2 credential verification in front of each end-user request and
+    # made the middleware fail whenever the panel was slow.
     if cached is not None and not _record_is_stale(cached):
         return cached
+
+    refreshable = bool((scope.session or {}).get("client_secret")) or bool(settings.admin_panel_client_secret)
+    if not refreshable:
+        return cached
+
+    try:
+        refreshed = await _refresh_scope_record(scope, module_code, cache=cache, admin_client=admin_client)
+        if refreshed is not None:
+            return refreshed
+    except Exception as exc:
+        logger.warning(
+            "Runtime refresh failed for company=%s module=%s branch=%s: %s",
+            scope.company_code,
+            module_code,
+            scope.branch_code,
+            exc,
+        )
+
+    # A stale record still beats no answer: the entitlement it carries was valid
+    # recently, and the alternative is refusing a request the customer has paid for.
     return cached
 
 
@@ -657,7 +687,7 @@ async def require_sync_key(
             timestamp_value = int(x_sync_timestamp)
         except Exception:
             _fail(401, "sync_signature_invalid", "Invalid sync timestamp")
-        now_ts = int(datetime.utcnow().timestamp())
+        now_ts = int(datetime.now(timezone.utc).timestamp())
         if abs(now_ts - timestamp_value) > 300:
             _fail(401, "sync_signature_expired", "Sync signature timestamp is too old")
         body = await request.body()
@@ -700,9 +730,6 @@ async def _require_module_parameters_payload(
         _fail(403, "token_module_mismatch", "Token is not valid for this module")
 
     scope = await _resolve_entitlement_scope(request, claims, cache)
-    if scope.branch_code is None:
-        await _reconcile_scope_cache(scope, cache=cache)
-
     record = await _get_effective_record(scope, module_code, cache=cache)
     records: list[dict[str, Any]] = []
     if scope.branch_code is None:
@@ -850,7 +877,6 @@ async def require_all_module_entitlements(
     cfg: IntegrationSettings = Depends(get_settings),
 ) -> EntitlementsContext:
     scope = await _resolve_entitlement_scope(request, claims, cache)
-    await _reconcile_scope_cache(scope, cache=cache)
     records = await cache.list_entitlements(company_code=scope.company_code, domain=scope.domain)
     return EntitlementsContext([
         _build_entitlement_context(record, scope=scope, claims=claims, module_code=str(record.get("module_code")), cfg=cfg)
@@ -899,7 +925,30 @@ async def perform_full_sync(
     }
 
 
+_reconcile_task: "asyncio.Task[None] | None" = None
+
+
+async def _reconcile_loop(interval: int) -> None:
+    """Pull the delta since our cursor on a timer.
+
+    Backend pushes keep the cache current in normal operation; this closes the gap
+    when a delivery is lost entirely, and lets the request path stay on Redis. It
+    is cheap because it is a delta, not a full reclone.
+    """
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            result = await reconcile_effective_configs()
+            if result.get("replaced") or result.get("deleted"):
+                logger.info("Background reconcile applied %s", result)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("Background reconcile failed: %s", exc)
+
+
 async def startup_integration() -> None:
+    global _reconcile_task
     await _cache.connect()
     if settings.sync_on_startup:
         try:
@@ -910,8 +959,21 @@ async def startup_integration() -> None:
         except Exception as exc:
             logger.warning("Initial bootstrap sync failed: %s", exc)
 
+    interval = int(settings.reconcile_interval_seconds or 0)
+    if interval > 0 and settings.admin_panel_client_id and settings.admin_panel_client_secret:
+        _reconcile_task = asyncio.create_task(_reconcile_loop(interval))
+        logger.info("Background reconcile every %ss", interval)
+
 
 async def shutdown_integration() -> None:
+    global _reconcile_task
+    if _reconcile_task is not None:
+        _reconcile_task.cancel()
+        try:
+            await _reconcile_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        _reconcile_task = None
     try:
         await _cache.disconnect()
     except Exception as exc:
