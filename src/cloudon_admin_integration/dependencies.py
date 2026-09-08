@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, RootModel
 
 from cloudon_admin_integration.admin_client import AdminPanelClient
 from cloudon_admin_integration.cache import IntegrationCache, is_license_current, parse_date_or_none
-from cloudon_admin_integration.config import IntegrationSettings, settings
+from cloudon_admin_integration.config import IntegrationSettings, _normalize_prefix, settings
 from cloudon_admin_integration.security import ApiClientClaims, require_valid_api_client_token
 
 logger = logging.getLogger(__name__)
@@ -62,6 +62,20 @@ async def bootstrap_and_cache_client(
         branch_code=branch_code,
         module_code=module_code,
     )
+
+    # The panel publishes the namespace every middleware should use, so the fleet
+    # shares one value instead of each service carrying its own REDIS_KEY_PREFIX.
+    # A mismatch means the keys we just wrote are not the ones we will read, so
+    # say so loudly: the operator needs to resync after changing it.
+    published_prefix = _normalize_prefix(payload.get("redis_key_prefix"))
+    if published_prefix and published_prefix != cache_client.cfg.redis_key_prefix:
+        logger.warning(
+            "Admin panel publishes redis prefix %r but this service is configured with %r. "
+            "Entitlements cached under the old prefix will be ignored until a resync.",
+            published_prefix,
+            cache_client.cfg.redis_key_prefix,
+        )
+
     records, client_session = api_client.normalize_bootstrap_bundle(payload)
     algorithm = settings.admin_panel_jwt_algorithm.upper()
     client_session["client_secret"] = client_secret

@@ -750,3 +750,41 @@ class StalenessTimezoneTests(unittest.TestCase):
         from cloudon_admin_integration.dependencies import _record_is_stale
 
         self.assertFalse(_record_is_stale({}))
+
+
+class RedisPrefixNormalizationTests(unittest.TestCase):
+    """One namespace for the fleet, tolerant of how it is written (I9)."""
+
+    def test_trailing_colon_is_stripped(self):
+        from cloudon_admin_integration.config import _normalize_prefix
+
+        self.assertEqual(_normalize_prefix("admin_panel:"), "admin_panel")
+
+    def test_bare_form_is_unchanged(self):
+        from cloudon_admin_integration.config import _normalize_prefix
+
+        self.assertEqual(_normalize_prefix("admin_panel"), "admin_panel")
+
+    def test_whitespace_and_repeated_colons_are_trimmed(self):
+        from cloudon_admin_integration.config import _normalize_prefix
+
+        self.assertEqual(_normalize_prefix("  admin_panel::  "), "admin_panel")
+
+    def test_blank_becomes_none_so_the_caller_can_default(self):
+        from cloudon_admin_integration.config import _normalize_prefix
+
+        self.assertIsNone(_normalize_prefix("   "))
+        self.assertIsNone(_normalize_prefix(":"))
+        self.assertIsNone(_normalize_prefix(None))
+
+    def test_key_layout_has_no_doubled_separator(self):
+        from cloudon_admin_integration.cache import IntegrationCache
+        from cloudon_admin_integration.config import _normalize_prefix
+
+        cfg = SimpleNamespace(
+            redis_key_prefix=_normalize_prefix("admin_panel:"), cache_stale_after_seconds=3600
+        )
+        key = IntegrationCache(cfg)._key("tenant-a", 2001, "pharmacy_one")
+
+        self.assertEqual(key, "admin_panel:pharmacy_one:tenant-a:2001")
+        self.assertNotIn("::", key)

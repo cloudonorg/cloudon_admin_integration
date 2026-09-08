@@ -27,6 +27,17 @@ def _dedupe(values: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(value for value in values if value))
 
 
+def _normalize_prefix(value: str | None) -> str | None:
+    """Trim a Redis namespace to its bare form.
+
+    Keys are composed as "<prefix>:<module>:<domain>:<company>", so a configured
+    "admin_panel:" would otherwise produce a doubled separator.
+    """
+    if value is None:
+        return None
+    return value.strip().rstrip(":").strip() or None
+
+
 def _normalize_key_material(value: str | None) -> str | None:
     if value is None:
         return None
@@ -117,7 +128,7 @@ class IntegrationSettings:
             redis_port=int(os.getenv("REDIS_PORT") or 6379),
             redis_db=int(os.getenv("REDIS_DB") or 0),
             redis_password=(os.getenv("REDIS_PASSWORD") or "").strip() or None,
-            redis_key_prefix=(os.getenv("REDIS_KEY_PREFIX") or "cloudon:integration").strip(),
+            redis_key_prefix=_normalize_prefix(os.getenv("REDIS_KEY_PREFIX")) or "cloudon:integration",
             admin_panel_jwt_algorithm=(os.getenv("ADMIN_PANEL_JWT_ALGORITHM") or "HS256").strip(),
             admin_panel_jwt_signing_key=_normalize_key_material(os.getenv("ADMIN_PANEL_JWT_SIGNING_KEY")),
             admin_panel_jwt_public_key=_normalize_key_material(os.getenv("ADMIN_PANEL_JWT_PUBLIC_KEY")),
