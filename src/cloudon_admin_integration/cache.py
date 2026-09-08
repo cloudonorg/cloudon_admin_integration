@@ -41,6 +41,13 @@ class IntegrationCache:
     def __init__(self, cfg: IntegrationSettings):
         self.cfg = cfg
         self.redis: redis.Redis | None = None
+        # Counter for out-of-order deliveries dropped by upsert_effective_config.
+        # Surfaced by /get-redis-data so a target that is retrying heavily is visible.
+        self._stale_writes_rejected = 0
+
+    @property
+    def stale_writes_rejected(self) -> int:
+        return self._stale_writes_rejected
 
     @staticmethod
     def _norm_code(value: Any, *, default: str | None = None) -> str | None:
@@ -330,6 +337,24 @@ class IntegrationCache:
             raise ValueError("company_code and module_code are required")
         key = self._key(domain, company_code, module_code, branch_code)
         existing = await self._get_record_by_key(key)
+
+        # Reject stale writes. The backend retries failed deliveries with backoff (up
+        # to 5 minutes), so a delivery that eventually succeeds can arrive after a
+        # newer event for the same scope and would otherwise roll the cache back to
+        # older licence state. Branch-scoped events patch a sub-document of the same
+        # key, so they are exempt: their version tracks a different scope.
+        incoming_version = int(record.get("version") or 0)
+        existing_version = int((existing or {}).get("version") or 0)
+        if (
+            existing is not None
+            and self._is_root_branch(branch_code)
+            and incoming_version
+            and existing_version
+            and incoming_version < existing_version
+        ):
+            self._stale_writes_rejected += 1
+            return existing
+
         normalized = self._aggregate_record(record, existing)
         normalized["updated_at"] = normalized.get("updated_at") or utc_now_iso()
         normalized["stale_at"] = (
@@ -384,10 +409,17 @@ class IntegrationCache:
             domain = client_session.get("infrastructure_domain")
         existing_keys = []
         if company_code is not None:
+            # Keys are "<prefix>:<module>:<domain>:<company>", so the company code is
+            # the trailing segment with no colon after it. Matching on ":<code>:" could
+            # never hit, which meant a full bootstrap silently pruned nothing and stale
+            # entries (revoked licences, unassigned modules) kept serving from cache.
+            company_suffix = f":{self._norm_code(company_code)}"
+            domain_segment = f":{self._norm_code(domain)}:" if domain is not None else None
             existing_keys = [
                 key
                 for key in sorted(await redis_conn.smembers(self._index_key))
-                if f":{company_code}:" in key and (domain is None or f":{domain}:" in key)
+                if str(key).endswith(company_suffix)
+                and (domain_segment is None or domain_segment in str(key))
             ]
         replaced = 0
         deleted = 0

@@ -377,6 +377,26 @@ def _validate_entitlement_record(
             request.state.integration_message = _license_warning_message(days_left)
 
 
+def _token_company_allow_list(claims: ApiClientClaims) -> set[int] | None:
+    """Company codes a multi-tenant token may act for, or None if single-tenant.
+
+    A token is multi-tenant only when the backend says so, via a `tenants` claim
+    listing the permitted company codes. Anything else is bound to the single
+    company in `company_code` and cannot be redirected by request headers.
+    """
+    raw = claims.raw.get("tenants") if isinstance(claims.raw, dict) else None
+    if raw is None:
+        return None
+    if isinstance(raw, (str, int)):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple, set)):
+        return None
+    codes = {code for code in (_to_int_or_none(item) for item in raw) if code is not None}
+    if claims.company_code is not None:
+        codes.add(claims.company_code)
+    return codes or None
+
+
 async def _resolve_entitlement_scope(
     request: Request,
     claims: ApiClientClaims,
@@ -389,9 +409,32 @@ async def _resolve_entitlement_scope(
     session = await cache.get_client_session(claims.client_id) if claims.client_id else None
 
     token_company_id = str(claims.company_id).strip() if claims.company_id is not None else None
-    company_id = header_company_id or token_company_id
-    company_code = header_company_code if header_company_code is not None else claims.company_code
-    domain = header_domain or claims.infrastructure_domain
+
+    # Tenant identity comes from the verified token, never from a header. The local
+    # Redis holds every company this middleware has synced, and company_code + domain
+    # are exactly what compose the cache key, so honouring a caller-supplied override
+    # let an authenticated client read any other tenant's licences and parameters.
+    #
+    # Headers may still *select* within a token that is already scoped to more than
+    # one tenant, and only to a value the token itself permits.
+    allowed_company_codes = _token_company_allow_list(claims)
+
+    if allowed_company_codes is not None:
+        if header_company_code is not None and header_company_code not in allowed_company_codes:
+            _fail(403, "company_not_permitted", "Requested company_code is not allowed by this token")
+        company_code = header_company_code if header_company_code is not None else claims.company_code
+        company_id = header_company_id or token_company_id
+        domain = header_domain or claims.infrastructure_domain
+    else:
+        if header_company_code is not None and claims.company_code is not None and header_company_code != claims.company_code:
+            _fail(403, "company_mismatch", "X-Company-Code does not match the authenticated token")
+        if header_company_id and token_company_id and header_company_id != token_company_id:
+            _fail(403, "company_mismatch", "X-Company-Id does not match the authenticated token")
+        if header_domain and claims.infrastructure_domain and header_domain != claims.infrastructure_domain:
+            _fail(403, "domain_mismatch", "X-Infrastructure-Domain does not match the authenticated token")
+        company_id = token_company_id
+        company_code = claims.company_code
+        domain = claims.infrastructure_domain
 
     if session:
         company_id = company_id or str(session.get("company_id") or "").strip() or None
@@ -400,11 +443,11 @@ async def _resolve_entitlement_scope(
         domain = domain or (session.get("infrastructure_domain") or None)
 
     if not company_id:
-        _fail(403, "company_missing", "Could not resolve company_id from token/client session/header")
+        _fail(403, "company_missing", "Could not resolve company_id from token/client session")
     if company_code is None:
-        _fail(403, "company_code_missing", "Could not resolve company_code from token/session/header")
+        _fail(403, "company_code_missing", "Could not resolve company_code from token/session")
     if not domain:
-        _fail(403, "domain_missing", "Could not resolve infrastructure domain from token/session/header")
+        _fail(403, "domain_missing", "Could not resolve infrastructure domain from token/session")
 
     return _ResolvedEntitlementScope(
         client_id=claims.client_id,

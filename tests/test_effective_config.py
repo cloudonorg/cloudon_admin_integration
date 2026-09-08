@@ -107,8 +107,11 @@ class AdminPanelClientNormalizationTests(unittest.TestCase):
                 app_module_codes=("pharmacy_one",),
                 admin_panel_base_url="https://admin.example.com",
                 admin_panel_client_bootstrap_path="/api/client-auth/bootstrap/",
+                admin_panel_client_token_path="/api/client-auth/token/",
                 admin_panel_effective_config_resolve_path="/api/client-auth/effective-configs/resolve/",
                 admin_panel_effective_config_reconcile_path="/api/client-auth/effective-configs/reconcile/",
+                admin_panel_system_log_ingest_path="/api/system-logs/ingest/",
+                admin_panel_system_log_ingest_bulk_path="/api/system-logs/ingest-bulk/",
                 admin_panel_client_id="client-id",
                 admin_panel_client_secret="secret",
                 http_timeout_seconds=5,
@@ -463,3 +466,161 @@ class ModuleParameterDependencyTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _FakeRedis:
+    """Minimal in-memory stand-in for the subset of redis-py the cache uses."""
+
+    def __init__(self):
+        self.strings = {}
+        self.sets = {}
+
+    async def get(self, key):
+        return self.strings.get(key)
+
+    async def set(self, key, value):
+        self.strings[key] = value
+
+    async def delete(self, key):
+        return 1 if self.strings.pop(key, None) is not None else 0
+
+    async def sadd(self, key, member):
+        self.sets.setdefault(key, set()).add(member)
+
+    async def srem(self, key, member):
+        self.sets.get(key, set()).discard(member)
+
+    async def smembers(self, key):
+        return set(self.sets.get(key, set()))
+
+
+def _cache_with_fake_redis():
+    from cloudon_admin_integration.cache import IntegrationCache
+
+    cfg = SimpleNamespace(redis_key_prefix="cloudon:integration", cache_stale_after_seconds=3600)
+    cache = IntegrationCache(cfg)
+    cache.redis = _FakeRedis()
+    return cache
+
+
+def _record(*, company_code=2001, module_code="pharmacy_one", domain="sync-tenant", version=1, **extra):
+    record = {
+        "company_code": company_code,
+        "module_code": module_code,
+        "domain": domain,
+        "version": version,
+        "branch_code": None,
+        "params": {},
+        "effective_config": {},
+        "is_running": True,
+        "license_to_date": "2030-01-01",
+    }
+    record.update(extra)
+    return record
+
+
+class TenantScopeIsolationTests(unittest.IsolatedAsyncioTestCase):
+    """Headers must not redirect a single-tenant token at another company (I2)."""
+
+    async def _resolve(self, headers, claims):
+        from cloudon_admin_integration.dependencies import _resolve_entitlement_scope
+
+        return await _resolve_entitlement_scope(_Request(headers), claims, _Cache([]))
+
+    def _claims(self, **extra):
+        raw = extra.pop("raw", {})
+        return ApiClientClaims(
+            token_type="api_client",
+            client_id="client-a",
+            company_id="company-a",
+            company_code=2001,
+            infrastructure_domain="tenant-a",
+            raw=raw,
+            **extra,
+        )
+
+    async def test_header_cannot_override_company_code(self):
+        with self.assertRaises(Exception) as ctx:
+            await self._resolve({"X-Company-Code": "9999"}, self._claims())
+        self.assertEqual(ctx.exception.detail["reason"], "company_mismatch")
+
+    async def test_header_cannot_override_domain(self):
+        with self.assertRaises(Exception) as ctx:
+            await self._resolve({"X-Infrastructure-Domain": "tenant-b"}, self._claims())
+        self.assertEqual(ctx.exception.detail["reason"], "domain_mismatch")
+
+    async def test_matching_header_is_accepted(self):
+        scope = await self._resolve({"X-Company-Code": "2001"}, self._claims())
+        self.assertEqual(scope.company_code, 2001)
+        self.assertEqual(scope.domain, "tenant-a")
+
+    async def test_scope_falls_back_to_token_when_no_headers(self):
+        scope = await self._resolve({}, self._claims())
+        self.assertEqual(scope.company_code, 2001)
+        self.assertEqual(scope.domain, "tenant-a")
+
+    async def test_multi_tenant_token_may_select_a_permitted_company(self):
+        claims = self._claims(raw={"tenants": [2001, 2002]})
+        scope = await self._resolve({"X-Company-Code": "2002"}, claims)
+        self.assertEqual(scope.company_code, 2002)
+
+    async def test_multi_tenant_token_rejects_company_outside_allow_list(self):
+        claims = self._claims(raw={"tenants": [2001, 2002]})
+        with self.assertRaises(Exception) as ctx:
+            await self._resolve({"X-Company-Code": "9999"}, claims)
+        self.assertEqual(ctx.exception.detail["reason"], "company_not_permitted")
+
+
+class CacheRebuildPruneTests(unittest.IsolatedAsyncioTestCase):
+    """A full bootstrap must drop configs that no longer exist upstream (I5)."""
+
+    async def test_rebuild_prunes_keys_absent_from_the_new_bundle(self):
+        cache = _cache_with_fake_redis()
+        await cache.upsert_effective_config(_record(module_code="pharmacy_one"))
+        await cache.upsert_effective_config(_record(module_code="revoked_module"))
+        self.assertEqual(len(await cache.list_entitlements(company_code=2001)), 2)
+
+        result = await cache.rebuild(
+            [_record(module_code="pharmacy_one", version=2)],
+            client_session={"company_code": 2001, "infrastructure_domain": "sync-tenant", "client_id": "c1"},
+        )
+
+        self.assertEqual(result["deleted"], 2)
+        remaining = {row["module_code"] for row in await cache.list_entitlements(company_code=2001)}
+        self.assertEqual(remaining, {"pharmacy_one"})
+
+
+class VersionMonotonicityTests(unittest.IsolatedAsyncioTestCase):
+    """A retried older delivery must not roll newer state back (I6)."""
+
+    async def test_older_version_is_rejected(self):
+        cache = _cache_with_fake_redis()
+        await cache.upsert_effective_config(_record(version=10, license_to_date="2030-01-01"))
+        await cache.upsert_effective_config(_record(version=5, license_to_date="2020-01-01"))
+
+        stored = await cache.get_entitlement("sync-tenant", 2001, "pharmacy_one")
+        self.assertEqual(stored["version"], 10)
+        self.assertEqual(stored["license_to_date"], "2030-01-01")
+        self.assertEqual(cache.stale_writes_rejected, 1)
+
+    async def test_newer_version_is_applied(self):
+        cache = _cache_with_fake_redis()
+        await cache.upsert_effective_config(_record(version=10, license_to_date="2030-01-01"))
+        await cache.upsert_effective_config(_record(version=11, license_to_date="2031-06-30"))
+
+        stored = await cache.get_entitlement("sync-tenant", 2001, "pharmacy_one")
+        self.assertEqual(stored["version"], 11)
+        self.assertEqual(stored["license_to_date"], "2031-06-30")
+        self.assertEqual(cache.stale_writes_rejected, 0)
+
+    async def test_branch_events_are_not_blocked_by_company_version(self):
+        cache = _cache_with_fake_redis()
+        await cache.upsert_effective_config(_record(version=10))
+        await cache.upsert_effective_config(
+            _record(version=3, branch_code=100, params={"api_user": "branch-user"})
+        )
+
+        stored = await cache.get_entitlement("sync-tenant", 2001, "pharmacy_one")
+        branches = stored["params"]["branches"]
+        self.assertEqual([b["branch_code"] for b in branches], [100])
+        self.assertEqual(cache.stale_writes_rejected, 0)
