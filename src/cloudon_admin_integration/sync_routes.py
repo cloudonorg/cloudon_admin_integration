@@ -233,7 +233,7 @@ async def _apply_notification_payload(
     return {"applied": [{"type": "reconcile", **result}], "applied_count": 1}
 
 
-async def _apply_api_client_payload(item: dict[str, Any], *, cache: IntegrationCache) -> dict[str, Any] | None:
+async def apply_api_client_payload(item: dict[str, Any], *, cache: IntegrationCache) -> dict[str, Any] | None:
     """Store one client credential, so this service can recognise its caller.
 
     The panel sends the hash it holds, never a secret. Without this a service
@@ -289,7 +289,7 @@ async def _apply_sync_item(
             status_code=400,
             detail={"reason": "sync_payload_invalid", "message": "Sync payload must be a JSON object"},
         )
-    credential = await _apply_api_client_payload(item, cache=cache)
+    credential = await apply_api_client_payload(item, cache=cache)
     if credential is not None:
         return credential
     direct = await _apply_direct_effective_payload(item, cache=cache, admin_client=admin_client)
