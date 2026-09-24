@@ -74,13 +74,9 @@ APP_MODULE_CODE="pharmacy_one"
 # and unset restricts nothing — set this only to deliberately refuse the rest.
 APP_MODULE_CODES=pharmacy_one,rapid_test
 
-# The panel owns this namespace and every service shares it, so neither of these
-# is normally set: the defaults are "cloudon:admin_panel" and no fallback. They
-# exist for the window when a namespace changes — a service is restarted onto the
-# new name before a resync has filled it, so it reads the old one on a miss until
-# the old keys are deleted.
+# The panel owns this namespace and every service shares it, so this is not
+# normally set — the default is already "cloudon:admin_panel".
 REDIS_KEY_PREFIX="cloudon:admin_panel"
-REDIS_KEY_PREFIX_FALLBACKS="the-old-namespace"
 ```
 
 ### Choosing how a caller is identified
