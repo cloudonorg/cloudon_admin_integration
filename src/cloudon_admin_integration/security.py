@@ -1,6 +1,5 @@
 from typing import Any
 
-import jwt
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
@@ -48,111 +47,61 @@ def _allowed_module_codes() -> set[str]:
     return {code for code in codes if code}
 
 
-def _peek_unverified_claims(token: str) -> dict[str, Any] | None:
-    try:
-        decoded = jwt.decode(
-            token,
-            options={"verify_signature": False, "verify_exp": False, "verify_aud": False},
-            algorithms=[settings.admin_panel_jwt_algorithm],
-        )
-    except jwt.InvalidTokenError:
-        return None
-    return decoded if isinstance(decoded, dict) else None
-
-
-async def _resolve_verification_key(token: str) -> str:
-    unverified = _peek_unverified_claims(token) or {}
-    client_id = (unverified.get("client_id") or "").strip() or None
-    cache_error: RuntimeError | None = None
-    algorithm = settings.admin_panel_jwt_algorithm.upper()
-
-    # RS*/ES* verification should always use the configured public key.
-    # Redis session overrides are only meaningful for the legacy HS* flow.
-    if algorithm.startswith("HS") and client_id:
-        try:
-            from cloudon_admin_integration.dependencies import get_cache
-
-            session = await get_cache().get_client_session(client_id)
-        except RuntimeError as exc:
-            cache_error = exc
-        else:
-            if isinstance(session, dict):
-                verification_key = (session.get("verification_key") or "").strip()
-                if verification_key:
-                    return verification_key
-
-                client_secret = (session.get("client_secret") or "").strip()
-                if client_secret:
-                    return client_secret
-
-    try:
-        return settings.jwt_verification_key()
-    except RuntimeError as exc:
-        if cache_error is not None:
-            _fail(503, "cache_unavailable", str(cache_error))
-        raise exc
-
-
 async def require_valid_api_client_token(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> ApiClientClaims:
+    """Resolve a bearer token to the client it was minted for.
+
+    The token is opaque and means nothing outside this service: its scope lives
+    in Redis under a digest of it, put there by /auth/token after checking the
+    caller's secret against the credential the panel cached. Nothing is signed,
+    so a stolen token is useless once its entry expires or the credential is
+    withdrawn — and there is no verification key to distribute or rotate.
+    """
     if credentials is None:
         _fail(401, "token_missing", "Missing bearer token")
 
     if credentials.scheme.lower() != "bearer":
         _fail(401, "token_scheme_invalid", "Authorization scheme must be Bearer")
 
-    token = credentials.credentials
-    try:
-        verification_key = await _resolve_verification_key(token)
-    except RuntimeError as exc:
-        _fail(500, "token_verification_unavailable", str(exc))
+    from cloudon_admin_integration.client_auth import session_expired, token_digest
+    from cloudon_admin_integration.dependencies import get_cache
 
     try:
-        decoded = jwt.decode(
-            token,
-            verification_key,
-            algorithms=[settings.admin_panel_jwt_algorithm],
-            audience=settings.admin_panel_jwt_audience,
-            options={"verify_aud": bool(settings.admin_panel_jwt_audience)},
-        )
-    except jwt.ExpiredSignatureError:
-        _fail(401, "token_expired", "Token expired")
-    except jwt.InvalidTokenError:
+        session = await get_cache().get_access_token(token_digest(credentials.credentials))
+    except RuntimeError as exc:
+        _fail(503, "cache_unavailable", str(exc))
+
+    if not session:
         _fail(401, "token_invalid", "Invalid token")
-    except RuntimeError as exc:
-        _fail(500, "token_verification_unavailable", str(exc))
+    if session_expired(session):
+        _fail(401, "token_expired", "Token expired")
 
-    token_type = decoded.get("token_type")
-    if token_type != "api_client":
-        _fail(401, "token_type_invalid", "Invalid token_type")
-
-    company_code = _to_int_or_none(decoded.get("company_code"))
+    company_code = _to_int_or_none(session.get("company_code"))
     if company_code is None:
         _fail(401, "token_company_missing", "Token missing company_code")
 
-    token_module_code = (decoded.get("module_code") or "").strip() or None
+    module_code = (session.get("module_code") or "").strip() or None
     allowed_module_codes = _allowed_module_codes()
     if (
         settings.enforce_token_module_match
-        and token_module_code
-        and token_module_code not in allowed_module_codes
-        and token_module_code != "*"
+        and module_code
+        and allowed_module_codes
+        and module_code not in allowed_module_codes
+        and module_code != "*"
     ):
         _fail(403, "token_module_mismatch", "Token module_code does not match this middleware module set")
 
     return ApiClientClaims(
-        token_type=token_type,
-        client_id=decoded.get("client_id"),
-        company_id=(str(decoded.get("company_id")).strip() if decoded.get("company_id") is not None else None),
+        token_type="api_client",
+        client_id=session.get("client_id"),
+        company_id=(str(session.get("company_id")).strip() if session.get("company_id") is not None else None),
         company_code=company_code,
-        company_name=(decoded.get("company_name") or None),
-        infrastructure_id=(decoded.get("infrastructure_id") or None),
-        infrastructure_serial_num=(decoded.get("infrastructure_serial_num") or None),
-        infrastructure_domain=(decoded.get("infrastructure_domain") or None),
-        branch_code=_to_int_or_none(decoded.get("branch_code")),
-        module_code=token_module_code,
-        iat=decoded.get("iat"),
-        exp=decoded.get("exp"),
-        raw=decoded,
+        company_name=(session.get("company_name") or None),
+        infrastructure_id=(session.get("infrastructure_id") or None),
+        infrastructure_serial_num=(session.get("infrastructure_serial_num") or None),
+        infrastructure_domain=(session.get("infrastructure_domain") or None),
+        branch_code=_to_int_or_none(session.get("branch_code")),
+        module_code=module_code,
+        raw=session,
     )

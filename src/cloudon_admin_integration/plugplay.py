@@ -18,6 +18,7 @@ from cloudon_admin_integration.dependencies import (
     startup_integration,
     shutdown_integration,
 )
+from cloudon_admin_integration.client_auth import session_for, token_digest, verify_secret
 from cloudon_admin_integration.sync_routes import sync_router
 from cloudon_admin_integration.responses import wire_response_envelope
 
@@ -36,6 +37,42 @@ def _clean(value: str | None) -> str | None:
     return text or None
 
 
+
+async def _issue_token(
+    client: dict[str, Any],
+    cache: IntegrationCache,
+    *,
+    module_code: str | None = None,
+    branch_code: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Mint an opaque token for a recognised client and remember what it means."""
+    token, session, ttl = session_for(client)
+    if module_code:
+        session["module_code"] = module_code
+    if branch_code is not None:
+        try:
+            session["branch_code"] = int(branch_code)
+        except (TypeError, ValueError):
+            session["branch_code"] = None
+    await cache.store_access_token(token_digest(token), session, ttl)
+    response: dict[str, Any] = {
+        "access_token": token,
+        "token_type": "bearer",
+        "expires_in": ttl,
+        "company_code": session.get("company_code"),
+        "company_id": session.get("company_id"),
+        "infrastructure_domain": session.get("infrastructure_domain"),
+    }
+    if extra:
+        # Keep what the panel said about the company on a first-time bootstrap,
+        # minus the token it issued: this service mints its own now.
+        for key in ("company", "infrastructure", "modules", "records", "cache", "sync_cursor"):
+            if key in extra:
+                response[key] = extra[key]
+    return response
+
+
 def _register_auth_routes(app: FastAPI) -> None:
     @app.post("/auth/token")
     @app.post("/auth/token/")
@@ -50,13 +87,59 @@ def _register_auth_routes(app: FastAPI) -> None:
                 status_code=422,
                 detail={"reason": "client_credentials_missing", "message": "client_id and client_secret are required"},
             )
+        # Recognise the caller from the credential the panel cached here. It is
+        # the whole point of holding that data locally: a pharmacy does not stop
+        # being able to authenticate because the panel is briefly unreachable.
+        client = None
         try:
-            return await bootstrap_and_cache_client(
+            client = await cache.get_api_client(client_id)
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=503, detail={"reason": "cache_unavailable", "message": str(exc)}
+            ) from exc
+
+        if client:
+            if not client.get("is_active", True):
+                raise HTTPException(
+                    status_code=403,
+                    detail={"reason": "client_inactive", "message": "This client is not active"},
+                )
+            if not verify_secret(client_secret, str(client.get("client_secret_hash") or "")):
+                raise HTTPException(
+                    status_code=401,
+                    detail={"reason": "client_credentials_invalid", "message": "Invalid client credentials"},
+                )
+            return await _issue_token(client, cache, module_code=_clean(payload.module_code),
+                                      branch_code=_clean(payload.branch_code))
+
+        # Not cached yet — a credential created since the last push. Let the
+        # panel vouch for it, which also refills the cache, then mint our own.
+        try:
+            bundle = await bootstrap_and_cache_client(
                 client_id,
                 client_secret,
                 branch_code=_clean(payload.branch_code),
                 module_code=_clean(payload.module_code),
                 cache=cache,
+            )
+            company = bundle.get("company") if isinstance(bundle.get("company"), dict) else {}
+            infrastructure = (
+                bundle.get("infrastructure") if isinstance(bundle.get("infrastructure"), dict) else {}
+            )
+            return await _issue_token(
+                {
+                    "client_id": client_id,
+                    "company_id": company.get("id") or bundle.get("company_id"),
+                    "company_code": company.get("code") or bundle.get("company_code"),
+                    "company_name": company.get("name") or bundle.get("company_name"),
+                    "infrastructure_id": infrastructure.get("id"),
+                    "infrastructure_domain": infrastructure.get("domain"),
+                    "infrastructure_serial_num": infrastructure.get("serial_num"),
+                },
+                cache,
+                module_code=_clean(payload.module_code),
+                branch_code=_clean(payload.branch_code),
+                extra=bundle,
             )
         except httpx.HTTPStatusError as exc:
             detail = exc.response.text

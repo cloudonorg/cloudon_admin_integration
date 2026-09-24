@@ -60,13 +60,6 @@ def _fallback_prefixes(value: str | None, *, primary: str) -> tuple[str, ...]:
     return _dedupe(tuple(item for item in normalized if item and item != primary))
 
 
-def _normalize_key_material(value: str | None) -> str | None:
-    if value is None:
-        return None
-    normalized = value.strip()
-    if not normalized:
-        return None
-    return normalized.replace("\\n", "\n")
 
 
 @dataclass(frozen=True)
@@ -90,10 +83,6 @@ class IntegrationSettings:
     redis_db: int
     redis_password: str | None
     redis_key_prefix: str
-    admin_panel_jwt_algorithm: str
-    admin_panel_jwt_signing_key: str | None
-    admin_panel_jwt_public_key: str | None
-    admin_panel_jwt_audience: str | None
     enforce_token_module_match: bool
     license_extension_days: int
     integration_wrap_responses: bool
@@ -159,10 +148,6 @@ class IntegrationSettings:
                 os.getenv("REDIS_KEY_PREFIX_FALLBACKS"),
                 primary=_normalize_prefix(os.getenv("REDIS_KEY_PREFIX")) or DEFAULT_REDIS_KEY_PREFIX,
             ),
-            admin_panel_jwt_algorithm=(os.getenv("ADMIN_PANEL_JWT_ALGORITHM") or "HS256").strip(),
-            admin_panel_jwt_signing_key=_normalize_key_material(os.getenv("ADMIN_PANEL_JWT_SIGNING_KEY")),
-            admin_panel_jwt_public_key=_normalize_key_material(os.getenv("ADMIN_PANEL_JWT_PUBLIC_KEY")),
-            admin_panel_jwt_audience=(os.getenv("ADMIN_PANEL_JWT_AUDIENCE") or "").strip() or None,
             enforce_token_module_match=_as_bool(os.getenv("ENFORCE_TOKEN_MODULE_MATCH"), True),
             license_extension_days=int(
                 (os.getenv("ADMIN_PANEL_LICENSE_EXTENSION_DAYS") or os.getenv("LICENSE_EXTENSION_DAYS") or 0)
@@ -183,22 +168,6 @@ class IntegrationSettings:
     def admin_url(self, path: str) -> str:
         path_clean = path if path.startswith("/") else f"/{path}"
         return f"{self.admin_panel_base_url}{path_clean}"
-
-    def jwt_verification_key(self) -> str:
-        algorithm = self.admin_panel_jwt_algorithm.upper()
-        if algorithm.startswith("HS"):
-            if self.admin_panel_jwt_signing_key:
-                return self.admin_panel_jwt_signing_key
-            if self.admin_panel_client_secret:
-                return self.admin_panel_client_secret
-            raise RuntimeError("ADMIN_PANEL_CLIENT_SECRET is required for HS JWT verification")
-        if self.admin_panel_jwt_public_key:
-            return self.admin_panel_jwt_public_key
-        if self.admin_panel_jwt_signing_key:
-            return self.admin_panel_jwt_signing_key
-        raise RuntimeError(
-            "ADMIN_PANEL_JWT_PUBLIC_KEY or ADMIN_PANEL_JWT_SIGNING_KEY is required for asymmetric JWT verification"
-        )
 
 
 settings = IntegrationSettings.from_env()

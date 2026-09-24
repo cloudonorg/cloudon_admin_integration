@@ -38,10 +38,10 @@ Add these lines to the external API `requirements.txt`:
 
 ```txt
 git+https://github.com/cloudonorg/cloudon_admin_integration.git
-cryptography
 ```
 
-`cryptography` is required for `RS256` token verification.
+Pin it to a commit — a bare URL installs whatever the default branch holds on
+build day, so two rebuilds of the same tag can ship different integration code.
 
 ### 2. `.env.admin-panel`
 
@@ -80,26 +80,24 @@ APP_MODULE_CODES=pharmacy_one,rapid_test
 # new namespace. Clear FALLBACKS when the old keys are gone.
 REDIS_KEY_PREFIX="cloudon:admin_panel"
 REDIS_KEY_PREFIX_FALLBACKS=""
-
-# Only for services whose endpoints take a bearer token, i.e. that depend on
-# require_module_entitlement / require_module_parameters /
-# require_module_entitlements_for. A service that identifies the client from
-# headers, or reads the cache directly, never verifies a token and needs none of
-# these. A blank audience turns that check off, so empty is the same as absent.
-ADMIN_PANEL_JWT_ALGORITHM="RS256"
-ADMIN_PANEL_JWT_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n"
-ADMIN_PANEL_JWT_AUDIENCE=""
 ```
 
 ### Choosing how a caller is identified
 
 The package offers two, and the choice decides what else the service must do.
 
-**Bearer token** (`require_module_entitlement` and friends) — the panel issues a
-token bound to one company. The token *is* the tenant scope: a caller cannot ask
-about a company it was not issued for, and the service needs no auth of its own.
-This is the only option that isolates tenants by itself, and the one that needs
-the JWT settings above.
+**Bearer token** (`require_module_entitlement` and friends) — the client posts
+its `client_id` and `client_secret` to this service's `/auth/token`
+(`wire_integration(app, include_auth_routes=True)`). The secret is checked
+against the credential the panel cached here, and the service mints an opaque
+token of its own, held in Redis under a digest of it until it expires.
+
+The token *is* the tenant scope: it resolves to one company, so a caller cannot
+ask about another, and the endpoint needs no auth of its own. Nothing is signed,
+so there is no key to distribute or rotate, and a client can still authenticate
+while the panel is unreachable — which is the point of holding its data here. A
+credential the cache has not seen yet is checked with the panel once, and cached
+on the way through.
 
 **Headers** (`require_header_module_entitlement_for`) — the caller names the
 company in `X-Company-Code` and `X-Domain`. Nothing is verified: the scope is
@@ -116,8 +114,6 @@ Module notes:
   whether or not this service lists them.
 
 Security notes:
-- with `RS256`, external APIs should only receive the public key
-- do not set `ADMIN_PANEL_JWT_SIGNING_KEY` on external APIs
 - inside Docker, `localhost` is the API container itself; use `REDIS_HOST=redis` when the Redis service is named `redis`
 - `ADMIN_PANEL_SYNC_KEY` must match the admin backend `SYNC_KEY` exactly so webhook cache refresh requests are accepted
 - `SYNC_KEY` is still supported as a fallback for older integrations, but new APIs should use `ADMIN_PANEL_SYNC_KEY` in `.env.admin-panel`
@@ -593,12 +589,14 @@ git+https://github.com/cloudonorg/cloudon_admin_integration.git
 
 Set `REDIS_HOST=redis` when Redis is a Docker Compose service named `redis`.
 
-### `Token invalid` with `RS256`
+### `Token invalid`
 
+A token means nothing outside the service that minted it, and its entry expires.
 Check:
-- `cryptography` is installed
-- external API has `ADMIN_PANEL_JWT_PUBLIC_KEY`
-- external API does not use `ADMIN_PANEL_JWT_SIGNING_KEY`
+- the token came from *this* service's `/auth/token`, not another one's
+- it has not expired: `token_ttl_seconds` on the client, 30 minutes by default
+- the credential still exists in the cache and is active — withdrawing one drops
+  the sessions it minted
 
 ### `License not found`
 

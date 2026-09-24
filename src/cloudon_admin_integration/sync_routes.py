@@ -233,6 +233,51 @@ async def _apply_notification_payload(
     return {"applied": [{"type": "reconcile", **result}], "applied_count": 1}
 
 
+async def _apply_api_client_payload(item: dict[str, Any], *, cache: IntegrationCache) -> dict[str, Any] | None:
+    """Store one client credential, so this service can recognise its caller.
+
+    The panel sends the hash it holds, never a secret. Without this a service
+    could read a company's licences but had no way to tell who was asking.
+    """
+    if str(item.get("event_type") or item.get("type") or "").split(".")[0] != "api_client":
+        return None
+    client_id = str(item.get("client_id") or "").strip()
+    if not client_id:
+        return None
+    if _normalize_operation(item.get("operation")) == "delete" or item.get("deleted"):
+        removed = await cache.delete_api_client(client_id)
+        return {
+            "applied": [{"type": "api_client", "operation": "delete", "client_id": client_id, "deleted": removed}],
+            "applied_count": 1,
+        }
+    stored = await cache.upsert_api_client(
+        {
+            "client_id": client_id,
+            "client_secret_hash": item.get("client_secret_hash"),
+            "is_active": bool(item.get("is_active", True)),
+            "token_ttl_seconds": item.get("token_ttl_seconds"),
+            "company_id": item.get("company_id"),
+            "company_code": item.get("company_code"),
+            "company_name": item.get("company_name"),
+            "infrastructure_id": item.get("infrastructure_id"),
+            "infrastructure_domain": item.get("infrastructure_domain") or item.get("domain"),
+            "infrastructure_serial_num": item.get("infrastructure_serial_num"),
+            "updated_at": item.get("updated_at"),
+        }
+    )
+    return {
+        "applied": [
+            {
+                "type": "api_client",
+                "operation": "upsert",
+                "client_id": stored.get("client_id"),
+                "company_code": stored.get("company_code"),
+            }
+        ],
+        "applied_count": 1,
+    }
+
+
 async def _apply_sync_item(
     item: Any,
     *,
@@ -244,6 +289,9 @@ async def _apply_sync_item(
             status_code=400,
             detail={"reason": "sync_payload_invalid", "message": "Sync payload must be a JSON object"},
         )
+    credential = await _apply_api_client_payload(item, cache=cache)
+    if credential is not None:
+        return credential
     direct = await _apply_direct_effective_payload(item, cache=cache, admin_client=admin_client)
     if direct is not None:
         return direct

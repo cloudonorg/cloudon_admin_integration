@@ -134,6 +134,16 @@ class IntegrationCache:
     def _session_key(self, client_id: str) -> str:
         return f"{self.cfg.redis_key_prefix}:session:{client_id}"
 
+    def _api_client_key(self, client_id: str, *, prefix: str | None = None) -> str:
+        return f"{prefix or self.cfg.redis_key_prefix}:client:{client_id}"
+
+    @property
+    def _api_client_index_key(self) -> str:
+        return f"{self.cfg.redis_key_prefix}:clients"
+
+    def _token_key(self, token_digest: str) -> str:
+        return f"{self.cfg.redis_key_prefix}:token:{token_digest}"
+
     async def connect(self) -> None:
         self.redis = redis.Redis(
             host=self.cfg.redis_host,
@@ -400,6 +410,72 @@ class IntegrationCache:
         if sync_cursor is not None:
             await self.set_sync_cursor(int(sync_cursor or 0))
         return record
+
+    async def upsert_api_client(self, record: dict[str, Any]) -> dict[str, Any]:
+        """Cache one client credential: who it is, and what it may ask about.
+
+        The panel sends the stored hash, never a secret. A service checks a
+        presented secret against it locally, so recognising a caller does not
+        depend on the panel being reachable — the point of holding the data here
+        in the first place.
+        """
+        redis_conn = self._ensure()
+        client_id = self._norm_code(record.get("client_id"))
+        if not client_id:
+            raise ValueError("client_id is required")
+        stored = dict(record)
+        stored["updated_at"] = stored.get("updated_at") or utc_now_iso()
+        key = self._api_client_key(client_id)
+        await redis_conn.set(key, json.dumps(stored))
+        await redis_conn.sadd(self._api_client_index_key, key)
+        return stored
+
+    async def get_api_client(self, client_id: str) -> dict[str, Any] | None:
+        redis_conn = self._ensure()
+        normalized = self._norm_code(client_id)
+        if not normalized:
+            return None
+        for prefix in self._prefixes:
+            raw = await redis_conn.get(self._api_client_key(normalized, prefix=prefix))
+            if raw:
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    return data
+        return None
+
+    async def delete_api_client(self, client_id: str) -> int:
+        redis_conn = self._ensure()
+        normalized = self._norm_code(client_id)
+        if not normalized:
+            return 0
+        deleted = 0
+        for prefix in self._prefixes:
+            key = self._api_client_key(normalized, prefix=prefix)
+            deleted += await redis_conn.delete(key)
+            await redis_conn.srem(self._api_client_index_key, key)
+        # A withdrawn credential must not keep answering through a token it
+        # minted earlier, so its sessions go with it.
+        await redis_conn.delete(self._session_key(normalized))
+        await redis_conn.srem(self._session_index_key, self._session_key(normalized))
+        return deleted
+
+    async def store_access_token(self, token_digest: str, session: dict[str, Any], ttl_seconds: int) -> None:
+        """Hold a minted token's scope, keyed by a digest of the token itself.
+
+        The token is never stored: anyone who could read this cache would
+        otherwise be able to use one.
+        """
+        redis_conn = self._ensure()
+        await redis_conn.set(self._token_key(token_digest), json.dumps(session))
+        await redis_conn.expire(self._token_key(token_digest), max(int(ttl_seconds or 0), 1))
+
+    async def get_access_token(self, token_digest: str) -> dict[str, Any] | None:
+        redis_conn = self._ensure()
+        raw = await redis_conn.get(self._token_key(token_digest))
+        if not raw:
+            return None
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else None
 
     async def upsert_effective_config(self, record: dict[str, Any]) -> dict[str, Any]:
         redis_conn = self._ensure()

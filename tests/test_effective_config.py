@@ -1,3 +1,4 @@
+import json
 import unittest
 from datetime import date, datetime, timedelta, timezone as dt_timezone
 from types import SimpleNamespace
@@ -122,10 +123,6 @@ class AdminPanelClientNormalizationTests(unittest.TestCase):
                 redis_db=0,
                 redis_password=None,
                 redis_key_prefix="test:integration",
-                admin_panel_jwt_algorithm="HS256",
-                admin_panel_jwt_signing_key=None,
-                admin_panel_jwt_public_key=None,
-                admin_panel_jwt_audience=None,
                 enforce_token_module_match=True,
                 license_extension_days=0,
                 integration_wrap_responses=True,
@@ -476,6 +473,7 @@ class _FakeRedis:
         self.sets = {}
         self.get_calls = 0
         self.mget_calls = 0
+        self.expiries = {}
 
     async def get(self, key):
         self.get_calls += 1
@@ -499,6 +497,10 @@ class _FakeRedis:
     async def mget(self, keys):
         self.mget_calls += 1
         return [self.strings.get(k) for k in keys]
+
+    async def expire(self, key, seconds):
+        self.expiries[key] = seconds
+        return 1
 
 
 def _cache_with_fake_redis(prefix="cloudon:integration", fallbacks=()):
@@ -1028,3 +1030,86 @@ class ModuleAllowListTests(unittest.IsolatedAsyncioTestCase):
             rows = await _load_cached_entitlements(cache, scope)
 
         self.assertEqual({row["module_code"] for row in rows}, {"pharmacy_one", "rapid_test"})
+
+
+class ClientCredentialAuthTests(unittest.IsolatedAsyncioTestCase):
+    """Recognising a caller from the credential the panel cached here.
+
+    The panel used to sign a token and every service verified it with a public
+    key, which put a second secret in each `.env` and made minting a token
+    depend on the panel being reachable from a machine whose whole point is to
+    keep serving when it is not.
+    """
+
+    #: django.contrib.auth.hashers.make_password("s3cret-value") with 1000 rounds.
+    ENCODED = (
+        "pbkdf2_sha256$1000$saltysalt$"
+        + __import__("base64").b64encode(
+            __import__("hashlib").pbkdf2_hmac("sha256", b"s3cret-value", b"saltysalt", 1000)
+        ).decode()
+    )
+
+    def test_the_panels_hash_is_verified_locally(self):
+        from cloudon_admin_integration.client_auth import verify_secret
+
+        self.assertTrue(verify_secret("s3cret-value", self.ENCODED))
+        self.assertFalse(verify_secret("wrong", self.ENCODED))
+
+    def test_a_hash_this_cannot_read_is_refused_rather_than_guessed(self):
+        from cloudon_admin_integration.client_auth import verify_secret
+
+        self.assertFalse(verify_secret("s3cret-value", "argon2$something"))
+        self.assertFalse(verify_secret("s3cret-value", ""))
+        self.assertFalse(verify_secret("", self.ENCODED))
+
+    async def test_a_credential_round_trips_through_the_cache(self):
+        cache = _cache_with_fake_redis()
+        await cache.upsert_api_client(
+            {"client_id": "cid-1", "client_secret_hash": self.ENCODED, "company_code": 2001, "is_active": True}
+        )
+
+        stored = await cache.get_api_client("cid-1")
+
+        self.assertEqual(stored["company_code"], 2001)
+        self.assertNotIn("client_secret", stored)
+
+    async def test_a_withdrawn_credential_is_gone(self):
+        cache = _cache_with_fake_redis()
+        await cache.upsert_api_client({"client_id": "cid-1", "client_secret_hash": self.ENCODED})
+
+        await cache.delete_api_client("cid-1")
+
+        self.assertIsNone(await cache.get_api_client("cid-1"))
+
+    async def test_a_minted_token_resolves_to_its_company_and_expires(self):
+        from cloudon_admin_integration.client_auth import session_expired, session_for, token_digest
+
+        cache = _cache_with_fake_redis()
+        token, session, ttl = session_for(
+            {"client_id": "cid-1", "company_code": 2001, "infrastructure_domain": "sync-tenant"},
+            ttl_seconds=900,
+        )
+        await cache.store_access_token(token_digest(token), session, ttl)
+
+        resolved = await cache.get_access_token(token_digest(token))
+
+        self.assertEqual(resolved["company_code"], 2001)
+        self.assertEqual(ttl, 900)
+        self.assertFalse(session_expired(resolved))
+
+    async def test_the_token_itself_is_never_stored(self):
+        from cloudon_admin_integration.client_auth import session_for, token_digest
+
+        cache = _cache_with_fake_redis()
+        token, session, ttl = session_for({"client_id": "cid-1", "company_code": 2001})
+        await cache.store_access_token(token_digest(token), session, ttl)
+
+        self.assertNotIn(token, json.dumps(cache.redis.strings))
+        self.assertTrue(any(token_digest(token) in key for key in cache.redis.strings))
+
+    def test_an_expired_session_is_seen_as_expired(self):
+        from cloudon_admin_integration.client_auth import session_expired
+
+        past = (datetime.now(tz=dt_timezone.utc) - timedelta(minutes=1)).isoformat()
+        self.assertTrue(session_expired({"expires_at": past}))
+        self.assertTrue(session_expired({"expires_at": "not-a-date"}))
