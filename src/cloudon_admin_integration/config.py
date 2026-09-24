@@ -13,10 +13,11 @@ DEFAULT_SYSTEM_LOG_INGEST_BULK_PATH = "/api/system-logs/ingest-bulk/"
 # A service is free to keep its own data in the same Redis under its own
 # namespace: the panel only ever touches keys it finds in its own index.
 DEFAULT_REDIS_KEY_PREFIX = "cloudon:admin_panel"
-# Namespaces this service still reads from while a cutover is in flight. Reads
-# fall back to them on a miss; writes, deletes and pruning always use the
-# primary. Emptied once the old keys are gone.
-DEFAULT_REDIS_KEY_PREFIX_FALLBACKS = ("cloudon:integration",)
+# Namespaces to read besides the one above. Empty, because the fleet shares one
+# and there is nothing to migrate from: this exists only for the window when a
+# namespace changes, where a service is restarted onto the new name before a
+# resync has filled it. Set it then, and clear it when the old keys are gone.
+DEFAULT_REDIS_KEY_PREFIX_FALLBACKS: tuple[str, ...] = ()
 
 
 def _as_bool(value: str | None, default: bool) -> bool:
