@@ -501,10 +501,14 @@ class _FakeRedis:
         return [self.strings.get(k) for k in keys]
 
 
-def _cache_with_fake_redis():
+def _cache_with_fake_redis(prefix="cloudon:integration", fallbacks=()):
     from cloudon_admin_integration.cache import IntegrationCache
 
-    cfg = SimpleNamespace(redis_key_prefix="cloudon:integration", cache_stale_after_seconds=3600)
+    cfg = SimpleNamespace(
+        redis_key_prefix=prefix,
+        redis_key_prefix_fallbacks=tuple(fallbacks),
+        cache_stale_after_seconds=3600,
+    )
     cache = IntegrationCache(cfg)
     cache.redis = _FakeRedis()
     return cache
@@ -915,3 +919,68 @@ class ResponseEnvelopeHeaderTests(unittest.TestCase):
 
         self.assertTrue(body["success"])
         self.assertEqual(body["data"], {"ok": True})
+
+
+class PrefixCutoverTests(unittest.IsolatedAsyncioTestCase):
+    """Moving to `cloudon:admin_panel` must not blind a service mid-flight.
+
+    A live service is restarted onto the new namespace before the panel has
+    resynced into it, so for a while the only copy of a licence is the one under
+    the old prefix. Reads fall back to it; writes, prunes and deletes stay on the
+    primary so the old namespace only ever shrinks.
+    """
+
+    OLD = "cloudon:integration"
+    NEW = "cloudon:admin_panel"
+
+    def _both(self):
+        return _cache_with_fake_redis(prefix=self.NEW, fallbacks=(self.OLD,))
+
+    async def _seed_old(self, cache, **record):
+        old = _cache_with_fake_redis(prefix=self.OLD)
+        old.redis = cache.redis
+        return await old.upsert_effective_config(_record(**record))
+
+    async def test_a_licence_only_in_the_old_namespace_is_still_served(self):
+        cache = self._both()
+        await self._seed_old(cache, version=4)
+
+        stored = await cache.get_entitlement("sync-tenant", 2001, "pharmacy_one")
+
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored["version"], 4)
+
+    async def test_the_new_namespace_wins_once_the_resync_lands(self):
+        cache = self._both()
+        await self._seed_old(cache, version=4, license_to_date="2020-01-01")
+        await cache.upsert_effective_config(_record(version=5, license_to_date="2031-01-01"))
+
+        stored = await cache.get_entitlement("sync-tenant", 2001, "pharmacy_one")
+
+        self.assertEqual(stored["license_to_date"], "2031-01-01")
+
+    async def test_writes_never_touch_the_old_namespace(self):
+        cache = self._both()
+        await cache.upsert_effective_config(_record(version=5))
+
+        written = set(cache.redis.strings)
+        self.assertTrue(all(key.startswith(self.NEW) for key in written), written)
+
+    async def test_a_company_in_both_namespaces_is_listed_once(self):
+        cache = self._both()
+        await self._seed_old(cache, version=4)
+        await cache.upsert_effective_config(_record(version=5))
+
+        rows = await cache.list_entitlements(company_code=2001)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["version"], 5)
+
+    async def test_a_revoked_licence_is_dropped_from_both_namespaces(self):
+        cache = self._both()
+        await self._seed_old(cache, version=4)
+        await cache.upsert_effective_config(_record(version=5))
+
+        await cache.delete_effective_config("sync-tenant", 2001, "pharmacy_one")
+
+        self.assertIsNone(await cache.get_entitlement("sync-tenant", 2001, "pharmacy_one"))

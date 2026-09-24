@@ -74,17 +74,30 @@ class IntegrationCache:
                     out.append(code)
         return tuple(out)
 
+    @property
+    def _prefixes(self) -> tuple[str, ...]:
+        """Namespaces to read, primary first. Writes only ever use the primary.
+
+        Read through `getattr`: consumers build their settings object by hand
+        (tests, and services that predate this field), and a missing fallback
+        list means "primary only", never an error.
+        """
+        fallbacks = tuple(getattr(self.cfg, "redis_key_prefix_fallbacks", ()) or ())
+        return (self.cfg.redis_key_prefix, *(p for p in fallbacks if p != self.cfg.redis_key_prefix))
+
     def _key(
         self,
         domain: str | None,
         company_code: str | int | None,
         module_code: str,
         branch_code: str | int | None = None,
+        *,
+        prefix: str | None = None,
     ) -> str:
         norm_domain = self._norm_code(domain, default="unknown") or "unknown"
         norm_company = self._norm_code(company_code, default="unknown") or "unknown"
         norm_module = self._norm_code(module_code, default="unknown") or "unknown"
-        return f"{self.cfg.redis_key_prefix}:{norm_module}:{norm_domain}:{norm_company}"
+        return f"{prefix or self.cfg.redis_key_prefix}:{norm_module}:{norm_domain}:{norm_company}"
 
     def _legacy_key(
         self,
@@ -92,16 +105,23 @@ class IntegrationCache:
         company_code: str | int | None,
         module_code: str,
         branch_code: str | int | None = None,
+        *,
+        prefix: str | None = None,
     ) -> str:
         norm_domain = self._norm_code(domain, default="unknown") or "unknown"
         norm_company = self._norm_code(company_code, default="unknown") or "unknown"
         norm_module = self._norm_code(module_code, default="unknown") or "unknown"
         norm_branch = self._norm_code(branch_code, default="root") or "root"
-        return f"{self.cfg.redis_key_prefix}:effective:{norm_domain}:{norm_company}:{norm_module}:{norm_branch}"
+        return f"{prefix or self.cfg.redis_key_prefix}:effective:{norm_domain}:{norm_company}:{norm_module}:{norm_branch}"
 
     @property
     def _index_key(self) -> str:
         return f"{self.cfg.redis_key_prefix}:keys"
+
+    @property
+    def _index_keys(self) -> tuple[str, ...]:
+        """Every index this service reads. Only the first one is ever written."""
+        return tuple(f"{prefix}:keys" for prefix in self._prefixes)
 
     @property
     def _session_index_key(self) -> str:
@@ -160,8 +180,11 @@ class IntegrationCache:
         """
         if self._is_legacy_key(key):
             return True
-        prefix = f"{self.cfg.redis_key_prefix}:"
-        if not key.startswith(prefix):
+        for candidate in self._prefixes:
+            if key.startswith(f"{candidate}:"):
+                prefix = f"{candidate}:"
+                break
+        else:
             return True
         parts = key[len(prefix):].split(":")
         if len(parts) != 3:
@@ -198,7 +221,7 @@ class IntegrationCache:
         return data if isinstance(data, dict) else None
 
     def _is_legacy_key(self, key: str) -> bool:
-        return key.startswith(f"{self.cfg.redis_key_prefix}:effective:")
+        return any(key.startswith(f"{prefix}:effective:") for prefix in self._prefixes)
 
     @staticmethod
     def _is_root_branch(branch_code: Any) -> bool:
@@ -323,14 +346,21 @@ class IntegrationCache:
         branch_code: str | int | None = None,
     ) -> None:
         redis_conn = self._ensure()
-        if branch_code is None:
-            prefix = self._legacy_key(domain, company_code, module_code, "")[:-4]
-            keys = [key for key in await redis_conn.smembers(self._index_key) if str(key).startswith(prefix)]
-            keys.append(self._legacy_key(domain, company_code, module_code, None))
-        else:
-            keys = [self._legacy_key(domain, company_code, module_code, branch_code)]
+        keys: list[str] = []
+        for namespace in self._prefixes:
+            if branch_code is None:
+                stem = self._legacy_key(domain, company_code, module_code, "", prefix=namespace)[:-4]
+                for index_key in self._index_keys:
+                    keys.extend(
+                        str(key) for key in await redis_conn.smembers(index_key) if str(key).startswith(stem)
+                    )
+                keys.append(self._legacy_key(domain, company_code, module_code, None, prefix=namespace))
+            else:
+                keys.append(self._legacy_key(domain, company_code, module_code, branch_code, prefix=namespace))
         for key in set(keys):
             await redis_conn.delete(key)
+            for index_key in self._index_keys:
+                await redis_conn.srem(index_key, key)
             await redis_conn.srem(self._index_key, key)
 
     async def get_sync_cursor(self) -> int:
@@ -419,23 +449,48 @@ class IntegrationCache:
     ) -> int:
         redis_conn = self._ensure()
         key = self._key(domain, company_code, module_code, branch_code)
+        # Every namespace this service reads, or a licence revoked here would go
+        # on being served from the one it was not deleted from.
+        scope_keys = [
+            self._key(domain, company_code, module_code, branch_code, prefix=prefix)
+            for prefix in self._prefixes
+        ]
         if branch_code is not None:
-            existing = await self._get_record_by_key(key)
+            existing = None
+            for candidate in scope_keys:
+                existing = await self._get_record_by_key(candidate)
+                if existing:
+                    break
             if existing:
+                existing.pop("_cache_key", None)
                 existing["params"] = self._remove_branch_params(existing.get("params"), branch_code)
                 effective_config = copy.deepcopy(existing.get("effective_config") or {})
                 effective_config["parameters"] = copy.deepcopy(existing.get("params") or {})
                 existing["effective_config"] = effective_config
                 existing["updated_at"] = utc_now_iso()
+                # The corrected document is written to the primary namespace even
+                # when it was read from an older one: the copy that answers reads
+                # has to be the copy the panel keeps up to date.
                 await redis_conn.set(key, json.dumps(existing))
+                await redis_conn.sadd(self._index_key, key)
+                for stale in scope_keys[1:]:
+                    await redis_conn.delete(stale)
+                    for index_key in self._index_keys[1:]:
+                        await redis_conn.srem(index_key, stale)
                 await self._delete_legacy_keys(domain, company_code, module_code, branch_code)
                 return 1
-            legacy_key = self._legacy_key(domain, company_code, module_code, branch_code)
-            deleted = await redis_conn.delete(legacy_key)
-            await redis_conn.srem(self._index_key, legacy_key)
+            deleted = 0
+            for prefix in self._prefixes:
+                legacy_key = self._legacy_key(domain, company_code, module_code, branch_code, prefix=prefix)
+                deleted += await redis_conn.delete(legacy_key)
+                for index_key in self._index_keys:
+                    await redis_conn.srem(index_key, legacy_key)
             return deleted
-        deleted = await redis_conn.delete(key)
-        await redis_conn.srem(self._index_key, key)
+        deleted = 0
+        for candidate in scope_keys:
+            deleted += await redis_conn.delete(candidate)
+            for index_key in self._index_keys:
+                await redis_conn.srem(index_key, candidate)
         await self._delete_legacy_keys(domain, company_code, module_code, branch_code)
         return deleted
 
@@ -459,17 +514,21 @@ class IntegrationCache:
             # entries (revoked licences, unassigned modules) kept serving from cache.
             company_suffix = f":{self._norm_code(company_code)}"
             domain_segment = f":{self._norm_code(domain)}:" if domain is not None else None
+            indexed: set[str] = set()
+            for index_key in self._index_keys:
+                indexed.update(str(key) for key in await redis_conn.smembers(index_key))
             existing_keys = [
                 key
-                for key in sorted(await redis_conn.smembers(self._index_key))
-                if str(key).endswith(company_suffix)
-                and (domain_segment is None or domain_segment in str(key))
+                for key in sorted(indexed)
+                if key.endswith(company_suffix)
+                and (domain_segment is None or domain_segment in key)
             ]
         replaced = 0
         deleted = 0
         for key in existing_keys:
             await redis_conn.delete(key)
-            await redis_conn.srem(self._index_key, key)
+            for index_key in self._index_keys:
+                await redis_conn.srem(index_key, key)
             deleted += 1
         max_version = 0
         for record in records:
@@ -500,14 +559,27 @@ class IntegrationCache:
         module_code: str,
         branch_code: str | int | None = None,
     ) -> dict[str, Any] | None:
-        current = await self._get_record_by_key(self._key(domain, company_code, module_code, None))
-        if current:
-            return current
-        if branch_code is not None:
-            specific = await self._get_record_by_key(self._legacy_key(domain, company_code, module_code, branch_code))
-            if specific:
-                return specific
-        return await self._get_record_by_key(self._legacy_key(domain, company_code, module_code, None))
+        # Primary namespace first, in both layouts, before falling back: a
+        # cutover in flight must never serve an older document than the one the
+        # panel has already written under the new prefix.
+        for prefix in self._prefixes:
+            current = await self._get_record_by_key(
+                self._key(domain, company_code, module_code, None, prefix=prefix)
+            )
+            if current:
+                return current
+            if branch_code is not None:
+                specific = await self._get_record_by_key(
+                    self._legacy_key(domain, company_code, module_code, branch_code, prefix=prefix)
+                )
+                if specific:
+                    return specific
+            legacy = await self._get_record_by_key(
+                self._legacy_key(domain, company_code, module_code, None, prefix=prefix)
+            )
+            if legacy:
+                return legacy
+        return None
 
     async def list_entitlements(
         self,
@@ -519,7 +591,10 @@ class IntegrationCache:
         domain: str | None = None,
     ) -> list[dict[str, Any]]:
         redis_conn = self._ensure()
-        keys = sorted(await redis_conn.smembers(self._index_key))
+        seen: set[str] = set()
+        for index_key in self._index_keys:
+            seen.update(str(key) for key in await redis_conn.smembers(index_key))
+        keys = sorted(seen)
         module_codes = set(self._normalize_codes(module_code))
 
         # The key already encodes module, domain and company, so most rows can be
@@ -553,16 +628,36 @@ class IntegrationCache:
             if module_codes and str(record.get("module_code")) not in module_codes:
                 continue
             rows.append(record)
-        current_keys = {str(row.get("_cache_key")) for row in rows if not self._is_legacy_key(str(row.get("_cache_key") or ""))}
-        if current_keys:
-            rows = [
-                row
-                for row in rows
-                if not self._is_legacy_key(str(row.get("_cache_key") or ""))
-                or self._key(row.get("domain"), row.get("company_code"), row.get("module_code")) not in current_keys
-            ]
+        rows = self._dedupe_by_scope(rows)
         rows.sort(key=lambda item: (int(item.get("version") or 0), str(item.get("module_code") or ""), str(item.get("branch_code") or "")))
         return rows
+
+    def _key_rank(self, key: str) -> tuple[int, int]:
+        """How much a key is preferred: primary namespace first, current layout first.
+
+        One company/module can be present more than once while a cutover is in
+        flight — under the new prefix and the old one, in the current layout and
+        the legacy one. Listing all of them would double-count entitlements, so
+        each scope keeps exactly one record.
+        """
+        for position, prefix in enumerate(self._prefixes):
+            if key.startswith(f"{prefix}:"):
+                return (position, 1 if self._is_legacy_key(key) else 0)
+        return (len(self._prefixes), 1)
+
+    def _dedupe_by_scope(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        best: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for row in rows:
+            key = str(row.get("_cache_key") or "")
+            scope = (
+                str(row.get("module_code") or ""),
+                str(row.get("domain") or ""),
+                str(row.get("company_code") or ""),
+            )
+            current = best.get(scope)
+            if current is None or self._key_rank(key) < self._key_rank(str(current.get("_cache_key") or "")):
+                best[scope] = row
+        return list(best.values())
 
     async def dump(
         self,

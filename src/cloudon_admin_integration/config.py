@@ -9,6 +9,15 @@ DEFAULT_EFFECTIVE_CONFIG_RECONCILE_PATH = "/api/client-auth/effective-configs/re
 DEFAULT_SYSTEM_LOG_INGEST_PATH = "/api/system-logs/ingest/"
 DEFAULT_SYSTEM_LOG_INGEST_BULK_PATH = "/api/system-logs/ingest-bulk/"
 
+# One namespace for everything the admin panel owns, on every Redis it writes to.
+# A service is free to keep its own data in the same Redis under its own
+# namespace: the panel only ever touches keys it finds in its own index.
+DEFAULT_REDIS_KEY_PREFIX = "cloudon:admin_panel"
+# Namespaces this service still reads from while a cutover is in flight. Reads
+# fall back to them on a miss; writes, deletes and pruning always use the
+# primary. Emptied once the old keys are gone.
+DEFAULT_REDIS_KEY_PREFIX_FALLBACKS = ("cloudon:integration",)
+
 
 def _as_bool(value: str | None, default: bool) -> bool:
     if value is None:
@@ -36,6 +45,19 @@ def _normalize_prefix(value: str | None) -> str | None:
     if value is None:
         return None
     return value.strip().rstrip(":").strip() or None
+
+
+def _fallback_prefixes(value: str | None, *, primary: str) -> tuple[str, ...]:
+    """Namespaces to read from besides `primary`, in the order given.
+
+    Unset means the namespace this package used before it had one name, so a
+    service that never configured a prefix keeps serving from its existing keys
+    until a resync has filled the new ones. An explicit empty value turns the
+    fallback off, which is what ends a cutover.
+    """
+    raw = DEFAULT_REDIS_KEY_PREFIX_FALLBACKS if value is None else tuple(value.split(","))
+    normalized = (_normalize_prefix(item) for item in raw)
+    return _dedupe(tuple(item for item in normalized if item and item != primary))
 
 
 def _normalize_key_material(value: str | None) -> str | None:
@@ -82,6 +104,7 @@ class IntegrationSettings:
     # Defaulted so adding settings does not break callers that build this
     # explicitly (tests, and any consumer constructing it by hand).
     reconcile_interval_seconds: int = 300
+    redis_key_prefix_fallbacks: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls) -> "IntegrationSettings":
@@ -128,7 +151,11 @@ class IntegrationSettings:
             redis_port=int(os.getenv("REDIS_PORT") or 6379),
             redis_db=int(os.getenv("REDIS_DB") or 0),
             redis_password=(os.getenv("REDIS_PASSWORD") or "").strip() or None,
-            redis_key_prefix=_normalize_prefix(os.getenv("REDIS_KEY_PREFIX")) or "cloudon:integration",
+            redis_key_prefix=_normalize_prefix(os.getenv("REDIS_KEY_PREFIX")) or DEFAULT_REDIS_KEY_PREFIX,
+            redis_key_prefix_fallbacks=_fallback_prefixes(
+                os.getenv("REDIS_KEY_PREFIX_FALLBACKS"),
+                primary=_normalize_prefix(os.getenv("REDIS_KEY_PREFIX")) or DEFAULT_REDIS_KEY_PREFIX,
+            ),
             admin_panel_jwt_algorithm=(os.getenv("ADMIN_PANEL_JWT_ALGORITHM") or "HS256").strip(),
             admin_panel_jwt_signing_key=_normalize_key_material(os.getenv("ADMIN_PANEL_JWT_SIGNING_KEY")),
             admin_panel_jwt_public_key=_normalize_key_material(os.getenv("ADMIN_PANEL_JWT_PUBLIC_KEY")),

@@ -64,7 +64,12 @@ REDIS_HOST="redis"
 REDIS_PORT="6379"
 REDIS_DB="0"
 REDIS_PASSWORD=""
-REDIS_KEY_PREFIX="cloudon:integration"
+# The panel owns this namespace and every service shares it. Leave it unset
+# unless you are mid-cutover: the default is already the right value.
+REDIS_KEY_PREFIX="cloudon:admin_panel"
+# Namespaces still read, on a miss, while a prefix change is in flight. Set to
+# "" once the old keys are gone.
+REDIS_KEY_PREFIX_FALLBACKS="cloudon:integration"
 
 # Admin-panel webhook auth for /sync-redis-data
 ADMIN_PANEL_SYNC_KEY="change_me"
@@ -512,7 +517,7 @@ The cache is disposable. If Redis is cleared, the external API can rebuild by ca
 Actual cache keys look like:
 
 ```text
-cloudon:integration:{module_code}:{domain}:{company_code}
+cloudon:admin_panel:{module_code}:{domain}:{company_code}
 ```
 
 The value is one JSON document for the company-level module entitlement. License state lives at the
@@ -572,7 +577,7 @@ Check:
 - Redis contains keys like:
 
 ```text
-cloudon:integration:{module_code}:{domain}:{company_code}
+cloudon:admin_panel:{module_code}:{domain}:{company_code}
 ```
 
 ### Parameters are empty
