@@ -50,9 +50,15 @@ Create one `.env.admin-panel` file in each external API.
 # Admin backend base
 DJANGO_API_URL="https://devadminpanel.cloudon.gr"
 
-# JWT verification
+# JWT verification — only for services whose endpoints take a bearer token,
+# i.e. that depend on require_module_entitlement / require_module_parameters /
+# require_module_entitlements_for. A service that identifies the client from
+# headers (require_header_module_entitlement_for) or reads the cache directly
+# never verifies a token, and these three do nothing for it.
 ADMIN_PANEL_JWT_ALGORITHM="RS256"
 ADMIN_PANEL_JWT_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n"
+# Only when the panel issues tokens with an audience. Blank turns the check off,
+# so leaving it empty is the same as leaving it out.
 ADMIN_PANEL_JWT_AUDIENCE=""
 
 # Module context
