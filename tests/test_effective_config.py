@@ -984,3 +984,47 @@ class PrefixCutoverTests(unittest.IsolatedAsyncioTestCase):
         await cache.delete_effective_config("sync-tenant", 2001, "pharmacy_one")
 
         self.assertIsNone(await cache.get_entitlement("sync-tenant", 2001, "pharmacy_one"))
+
+
+class ModuleAllowListTests(unittest.IsolatedAsyncioTestCase):
+    """APP_MODULE_CODES is a refusal, not a subscription.
+
+    One cache holds every module a company has, and each endpoint asks for what
+    it needs. Unset used to mean "only the default module", which quietly hid
+    the rest of a company's entitlements from a service that had simply not
+    listed them.
+    """
+
+    def test_unset_leaves_the_allow_list_empty(self):
+        with patch.dict("os.environ", {"APP_MODULE_CODE": "pharmacy_one"}, clear=True):
+            settings = IntegrationSettings.from_env()
+
+        self.assertEqual(settings.app_module_code, "pharmacy_one")
+        self.assertEqual(settings.app_module_codes, ())
+
+    def test_an_explicit_list_is_kept(self):
+        with patch.dict(
+            "os.environ",
+            {"APP_MODULE_CODE": "sinopsis", "APP_MODULE_CODES": "iqvia,sinopsis"},
+            clear=True,
+        ):
+            settings = IntegrationSettings.from_env()
+
+        self.assertEqual(settings.app_module_codes, ("iqvia", "sinopsis"))
+        self.assertEqual(settings.app_module_code, "sinopsis")
+
+    async def test_no_allow_list_reads_every_module_in_the_cache(self):
+        from cloudon_admin_integration.dependencies import _load_cached_entitlements, _ResolvedEntitlementScope
+
+        cache = _cache_with_fake_redis()
+        await cache.upsert_effective_config(_record(module_code="pharmacy_one"))
+        await cache.upsert_effective_config(_record(module_code="rapid_test"))
+        scope = _ResolvedEntitlementScope(
+            client_id=None, company_id=None, company_code=2001, domain="sync-tenant", branch_code=None, session=None
+        )
+
+        with patch("cloudon_admin_integration.dependencies.settings") as cfg:
+            cfg.app_module_codes = ()
+            rows = await _load_cached_entitlements(cache, scope)
+
+        self.assertEqual({row["module_code"] for row in rows}, {"pharmacy_one", "rapid_test"})

@@ -676,13 +676,30 @@ async def _load_cached_entitlements(
     module_codes: str | Sequence[str] | None = None,
     admin_client: AdminPanelClient | None = None,
 ) -> list[dict[str, Any]]:
+    # No codes anywhere means no allow-list: read every module this company has
+    # in the cache, rather than silently narrowing to the service's default one.
     codes = _normalize_module_codes(module_codes) or settings.app_module_codes
+    if not codes:
+        return await _load_all_cached_entitlements(cache, scope)
     records: list[dict[str, Any]] = []
     for code in codes:
         record = await _get_effective_record(scope, code, cache=cache, admin_client=admin_client)
         if record:
             records.append(record)
     return records
+
+
+async def _load_all_cached_entitlements(
+    cache: IntegrationCache,
+    scope: _ResolvedEntitlementScope,
+) -> list[dict[str, Any]]:
+    """Every module cached for this company, whatever they are."""
+    return await cache.list_entitlements(
+        company_id=scope.company_id,
+        company_code=scope.company_code,
+        domain=scope.domain,
+        branch_code=scope.branch_code,
+    )
 
 
 async def require_sync_key(

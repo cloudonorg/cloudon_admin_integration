@@ -19,7 +19,8 @@
 Reusable FastAPI integration layer for CloudOn Admin Panel.
 
 It provides:
-- `POST /auth/token` for external API client authentication
+- `POST /auth/token` for external API client authentication, when asked for
+  (`include_auth_routes=True`)
 - local Redis cache for backend effective configs
 - bearer token validation for `api_client` tokens
 - header-scoped helpers for partner endpoints that use their own auth
@@ -44,49 +45,75 @@ cryptography
 
 ### 2. `.env.admin-panel`
 
-Create one `.env.admin-panel` file in each external API.
+Create one `.env.admin-panel` file in each external API. Five values are all a
+service needs to read licences and parameters:
 
 ```env
-# Admin backend base
+# Where the panel is. Change it here if the panel's domain moves.
 DJANGO_API_URL="https://devadminpanel.cloudon.gr"
 
-# JWT verification — only for services whose endpoints take a bearer token,
-# i.e. that depend on require_module_entitlement / require_module_parameters /
-# require_module_entitlements_for. A service that identifies the client from
-# headers (require_header_module_entitlement_for) or reads the cache directly
-# never verifies a token, and these three do nothing for it.
-ADMIN_PANEL_JWT_ALGORITHM="RS256"
-ADMIN_PANEL_JWT_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n"
-# Only when the panel issues tokens with an audience. Blank turns the check off,
-# so leaving it empty is the same as leaving it out.
-ADMIN_PANEL_JWT_AUDIENCE=""
+# Must match the panel's sync key exactly. It authenticates the pushes that keep
+# this cache current, and the bootstrap that refills it after a stop or rebuild.
+ADMIN_PANEL_SYNC_KEY="change_me"
 
-# Module context
-APP_MODULE_CODE="pharmacy_one"
-APP_MODULE_CODES=pharmacy_one,rapid_test,convert,open_cart
-
-# Redis integration cache
+# Redis holding the panel's data on this server.
 REDIS_HOST="redis"
 REDIS_PORT="6379"
 REDIS_DB="0"
 REDIS_PASSWORD=""
-# The panel owns this namespace and every service shares it. Leave it unset
-# unless you are mid-cutover: the default is already the right value.
-REDIS_KEY_PREFIX="cloudon:admin_panel"
-# Namespaces still read, on a miss, while a prefix change is in flight. Set to
-# "" once the old keys are gone.
-REDIS_KEY_PREFIX_FALLBACKS="cloudon:integration"
-
-# Admin-panel webhook auth for /sync-redis-data
-ADMIN_PANEL_SYNC_KEY="change_me"
 ```
+
+Everything below is optional, and most services set none of it.
+
+```env
+# The module a helper assumes when an endpoint does not name one. Declare it
+# once, beside the app; endpoints that want another module name it themselves.
+APP_MODULE_CODE="pharmacy_one"
+
+# An allow-list, not a subscription. One cache holds every module a company has,
+# and unset restricts nothing — set this only to deliberately refuse the rest.
+APP_MODULE_CODES=pharmacy_one,rapid_test
+
+# The panel owns this namespace and every service shares it. The default is
+# already "cloudon:admin_panel"; set it only while moving off another name, with
+# the old one in FALLBACKS so reads keep working until a resync has filled the
+# new namespace. Clear FALLBACKS when the old keys are gone.
+REDIS_KEY_PREFIX="cloudon:admin_panel"
+REDIS_KEY_PREFIX_FALLBACKS=""
+
+# Only for services whose endpoints take a bearer token, i.e. that depend on
+# require_module_entitlement / require_module_parameters /
+# require_module_entitlements_for. A service that identifies the client from
+# headers, or reads the cache directly, never verifies a token and needs none of
+# these. A blank audience turns that check off, so empty is the same as absent.
+ADMIN_PANEL_JWT_ALGORITHM="RS256"
+ADMIN_PANEL_JWT_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n"
+ADMIN_PANEL_JWT_AUDIENCE=""
+```
+
+### Choosing how a caller is identified
+
+The package offers two, and the choice decides what else the service must do.
+
+**Bearer token** (`require_module_entitlement` and friends) — the panel issues a
+token bound to one company. The token *is* the tenant scope: a caller cannot ask
+about a company it was not issued for, and the service needs no auth of its own.
+This is the only option that isolates tenants by itself, and the one that needs
+the JWT settings above.
+
+**Headers** (`require_header_module_entitlement_for`) — the caller names the
+company in `X-Company-Code` and `X-Domain`. Nothing is verified: the scope is
+whatever the caller says. **The endpoint must authenticate the caller itself**,
+as the transactions API does with HTTP Basic before it reads an entitlement.
+Without that, anyone who can reach the service can read any client's parameters,
+IDIKA credentials included.
 
 Module notes:
 - `APP_MODULE_CODE` is the default module used by helpers without an explicit module code.
-- `APP_MODULE_CODES` is the allowed module list for this external API.
-- For a single-module API, `APP_MODULE_CODE` is usually enough.
-- For a multi-module API, set `APP_MODULE_CODES`; `APP_MODULE_CODE` defaults to the first value if omitted.
-- The backend must return effective configs for the modules you want to read.
+- For a multi-module API, either name the module per endpoint or set `APP_MODULE_CODES`;
+  `APP_MODULE_CODE` defaults to the first value when it is not in the list.
+- The panel pushes every module a company holds, so the cache already has them
+  whether or not this service lists them.
 
 Security notes:
 - with `RS256`, external APIs should only receive the public key
@@ -169,8 +196,7 @@ wire_integration(app)
 ```
 
 `wire_integration(app)` registers:
-- `/auth/token`
-- sync routes
+- sync routes (`/sync-redis-data` and friends)
 - Redis startup/shutdown handling
 - response envelope handling
 

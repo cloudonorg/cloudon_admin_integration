@@ -110,10 +110,13 @@ class IntegrationSettings:
     def from_env(cls) -> "IntegrationSettings":
         base_url = (os.getenv("DJANGO_API_URL") or "").strip().rstrip("/")
         raw_module_code = (os.getenv("APP_MODULE_CODE") or "").strip() or None
+        # APP_MODULE_CODES is an allow-list, not a subscription: the panel pushes
+        # every module a company holds into one cache, and a service reads what
+        # its endpoints ask for. Left unset it restricts nothing, so a service
+        # only declares it to deliberately refuse the rest.
         module_codes = _dedupe(_as_csv(os.getenv("APP_MODULE_CODES"), ()))
         if not module_codes:
             module_code = raw_module_code or "pharmacy_one"
-            module_codes = (module_code,)
         else:
             module_code = raw_module_code if raw_module_code in module_codes else module_codes[0]
         return cls(
