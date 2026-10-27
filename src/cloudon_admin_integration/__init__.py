@@ -19,6 +19,7 @@ from cloudon_admin_integration.dependencies import (
     startup_integration,
     validate_license,
 )
+from cloudon_admin_integration.logs import emit_log, log_context, log_step, wire_logging
 from cloudon_admin_integration.plugplay import entitlement_dependency, entitlements_dependency, wire_integration
 from cloudon_admin_integration.responses import wire_response_envelope
 from cloudon_admin_integration.security import require_valid_api_client_token
@@ -29,10 +30,13 @@ __all__ = [
     "EntitlementContext",
     "EntitlementLicenseContext",
     "EntitlementsContext",
+    "emit_log",
     "get_cache",
     "get_effective_config",
     "get_parameters",
     "get_settings",
+    "log_context",
+    "log_step",
     "entitlement_dependency",
     "entitlements_dependency",
     "require_header_module_entitlement_for",
@@ -52,4 +56,5 @@ __all__ = [
     "validate_license",
     "wire_response_envelope",
     "wire_integration",
+    "wire_logging",
 ]

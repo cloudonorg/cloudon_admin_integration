@@ -418,6 +418,106 @@ async def integration_settings_view():
     }
 ```
 
+## Logs To The Admin Panel
+
+A service's failed requests — every 4xx and 5xx, and every unhandled exception —
+can be sent to the panel's System Logs, filed under its categories:
+
+| What happened | Filed as | Severity |
+|---|---|---|
+| unhandled exception | ERROR | HIGH |
+| other 5xx | ERROR | MEDIUM |
+| 401 / 403 | SECURITY | MEDIUM |
+| other 4xx | WARNING | LOW |
+
+Successful requests are not logged.
+
+### How it travels
+
+```text
+service ──XADD──▶ cloudon:logs ──XREADGROUP──▶ admin_panel_agent ──POST batch──▶ panel
+ (after the       (stream in the server's       (one per server)      (X-Agent-Key)
+  response)        Admin Panel Redis)          ◀─────── 200, then XACK + XDEL ───────┘
+```
+
+- The service only appends to a stream in its server's Admin Panel Redis. The
+  write happens after the response has gone out and gives up after 250 ms; if
+  Redis is down the log is lost and the request is not affected.
+- The server's agent sends the stream to the panel in batches and deletes a
+  record only once the panel has answered for it. A panel that is down costs a
+  delay, never a log. Each record has its own id, so a batch sent twice is
+  stored once.
+- A record the panel refuses is moved to `cloudon:logs:dead` with the reason.
+- The stream is capped (`CLOUDON_LOG_STREAM_MAXLEN`, default 100000, oldest
+  dropped first), so an agent that stops cannot fill the server's memory.
+- The agent's report (waiting, oldest waiting, dead) rides on every batch and is
+  shown in the panel, which warns when an agent falls behind or goes quiet.
+
+### In the service
+
+```python
+from cloudon_admin_integration import emit_log, log_context, log_step, wire_logging
+
+wire_integration(app)
+wire_logging(app)          # last, so it sees exceptions before they become 500s
+
+
+@app.post("/orders/{order_id}")
+async def create_order(order_id: int):
+    log_step("reading ERP")                 # a failure after this says so
+    log_context(supplier="acme")            # anything else worth keeping
+    ...
+    await emit_log("WARNING", "ERP answered slowly", "took 9 s")
+```
+
+Logging is opt-in: a service rebuilt onto a newer package does not start
+logging until it calls `wire_logging`. `wire_logging(app, skip_statuses=[404])`
+leaves out statuses that are routine for the service.
+
+Each record carries:
+
+- the route as written (`POST /orders/{order_id}`), shown as the System Log's
+  process, and the last `log_step`, shown as its step;
+- a request id, taken from `X-Request-ID` or made up, and returned in the
+  response's `X-Request-ID` so a caller can quote it;
+- the company and branch, from the entitlement check or the `X-Company-Id` /
+  `X-Branch-Code` headers;
+- the error's type, message and traceback, and up to 4 KB of the failed
+  response's body.
+
+Who sent it comes from the environment, all optional:
+
+```env
+# The ids the panel shows on the project's and the container's page. With them,
+# each log links to its project and container in the panel.
+CLOUDON_PROJECT_ID="7"
+CLOUDON_DOCKER_ID="12"
+# Defaults to the container name.
+CLOUDON_SERVICE="orders-api"
+```
+
+The service writes to the Redis named by `REDIS_HOST` / `REDIS_PORT` /
+`REDIS_PASSWORD` — the same one it reads licences and parameters from.
+
+### The agent
+
+One per server, beside the server's Admin Panel Redis:
+
+```bash
+python -m cloudon_admin_integration agent
+```
+
+```env
+ADMIN_PANEL_AGENT_KEY="..."   # issued by the panel for this server
+REDIS_HOST="redis_admin_panel"
+REDIS_PORT="6379"
+REDIS_PASSWORD="..."
+# DJANGO_API_URL defaults to the CloudOn panel.
+```
+
+The panel's "Install Admin Panel Redis" action is meant to install and configure it;
+until that exists it is run by hand, with a key from `manage.py issue_agent_key`.
+
 ## Auth And Cache Flow
 
 1. The external API calls `POST /auth/token` with `client_id` and `client_secret`.
