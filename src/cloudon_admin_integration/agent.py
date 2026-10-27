@@ -50,7 +50,7 @@ from cloudon_admin_integration.logs import DEFAULT_LOG_STREAM
 
 logger = logging.getLogger("cloudon_admin_integration.agent")
 
-DEFAULT_ADMIN_PANEL_URL = "https://devadminpanel.cloudon.gr"
+DEFAULT_ADMIN_PANEL_URL = "https://devadminpanel2.cloudon.gr"
 AGENT_BATCH_PATH = "/api/system-logs/agent-batch/"
 AGENT_KEY_HEADER = "X-Agent-Key"
 CONSUMER_GROUP = "admin_panel_agent"

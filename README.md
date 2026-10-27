@@ -50,7 +50,7 @@ service needs to read licences and parameters:
 
 ```env
 # Where the panel is. Change it here if the panel's domain moves.
-DJANGO_API_URL="https://devadminpanel.cloudon.gr"
+DJANGO_API_URL="https://devadminpanel2.cloudon.gr"
 
 # Must match the panel's sync key exactly. It authenticates the pushes that keep
 # this cache current, and the bootstrap that refills it after a stop or rebuild.
@@ -448,7 +448,7 @@ service ──XADD──▶ cloudon:logs ──XREADGROUP──▶ admin_panel_a
   delay, never a log. Each record has its own id, so a batch sent twice is
   stored once.
 - A record the panel refuses is moved to `cloudon:logs:dead` with the reason.
-- The stream is capped (`CLOUDON_LOG_STREAM_MAXLEN`, default 100000, oldest
+- The stream is capped (`CLOUDON_LOG_STREAM_MAXLEN`, default 50000, oldest
   dropped first), so an agent that stops cannot fill the server's memory.
 - The agent's report (waiting, oldest waiting, dead) rides on every batch and is
   shown in the panel, which warns when an agent falls behind or goes quiet.
@@ -499,24 +499,48 @@ CLOUDON_SERVICE="orders-api"
 The service writes to the Redis named by `REDIS_HOST` / `REDIS_PORT` /
 `REDIS_PASSWORD` — the same one it reads licences and parameters from.
 
-### The agent
+### The Admin Panel kit on each server
 
-One per server, beside the server's Admin Panel Redis:
+Each server has one kit: a Redis that carries the stream, and the agent beside
+it. The panel installs both from the server's page (**Admin Panel kit →
+Install**), over the SSH credentials it already holds. It runs read-only checks
+first and shows what it will do; nothing is set up by hand on a server.
+
+- **Attach** — the server already has a Redis holding the panel's licences and
+  parameters (the container ticked *Holds this panel's data*). The kit uses it
+  as it is: the agent joins that Redis's Docker network and reads the stream
+  from it. The Redis is never restarted or reconfigured, and the services that
+  already use it need no new connection settings.
+- **Create** — a new `redis_admin_panel` (Redis 7, AOF on, `noeviction`,
+  published on 127.0.0.1 only, on 6379 or the next free port, on the
+  `admin_panel` network, with its own password). If a container by that name
+  already exists it is used, not changed.
+
+Either way the agent runs as `admin_panel_agent` (`restart: unless-stopped`),
+built on the server from this repository at the commit the panel pins, with its
+settings in `/opt/admin_panel_kit/agent.env` (readable by root only):
+
+```env
+ADMIN_PANEL_AGENT_KEY="..."   # issued by the panel for this server on install
+REDIS_HOST="redis_admin_panel"
+REDIS_PORT="6379"
+REDIS_PASSWORD="..."
+DJANGO_API_URL="https://devadminpanel2.cloudon.gr"
+```
+
+The container the kit uses is marked **Admin Panel Redis** in the panel's
+inventory. *Holds this panel's data* keeps its own meaning: licences and
+parameters still reach a server through its sync target, pushed by the panel
+to the project that writes into that Redis. A new `redis_admin_panel` receives
+them the same way once it is ticked as holding the panel's data and a connected
+project writes into it.
+
+Removing the agent from the panel's page stops it and revokes its key; the
+Redis and anything in it are left alone. To run the agent by hand instead:
 
 ```bash
 python -m cloudon_admin_integration agent
 ```
-
-```env
-ADMIN_PANEL_AGENT_KEY="..."   # issued by the panel for this server
-REDIS_HOST="redis_admin_panel"
-REDIS_PORT="6379"
-REDIS_PASSWORD="..."
-# DJANGO_API_URL defaults to the CloudOn panel.
-```
-
-The panel's "Install Admin Panel Redis" action is meant to install and configure it;
-until that exists it is run by hand, with a key from `manage.py issue_agent_key`.
 
 ## Auth And Cache Flow
 

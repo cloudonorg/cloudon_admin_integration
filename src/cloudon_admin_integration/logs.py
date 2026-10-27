@@ -29,7 +29,7 @@ uses to link each record to its inventory:
     CLOUDON_CONTAINER    the container name (default: $HOSTNAME)
 
 The stream is `cloudon:logs` and is capped at CLOUDON_LOG_STREAM_MAXLEN records
-(default 100000), oldest dropped first, so an agent that stops cannot fill the
+(default 50000), oldest dropped first, so an agent that stops cannot fill the
 server's memory.
 """
 
@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
 DEFAULT_LOG_STREAM = "cloudon:logs"
-DEFAULT_LOG_STREAM_MAXLEN = 100_000
+DEFAULT_LOG_STREAM_MAXLEN = 50_000
 REQUEST_ID_HEADER = "x-request-id"
 
 #: How long a record may take to write before it is given up on.
