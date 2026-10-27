@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field, RootModel
 from cloudon_admin_integration.admin_client import AdminPanelClient
 from cloudon_admin_integration.cache import IntegrationCache, is_license_current, parse_date_or_none
 from cloudon_admin_integration.config import IntegrationSettings, _normalize_prefix, settings
+from cloudon_admin_integration.logs import log_context
 from cloudon_admin_integration.security import ApiClientClaims, require_valid_api_client_token
 
 logger = logging.getLogger(__name__)
@@ -411,6 +412,16 @@ def _token_company_allow_list(claims: ApiClientClaims) -> set[int] | None:
     return codes or None
 
 
+def _note_log_scope(scope: _ResolvedEntitlementScope) -> None:
+    """Tell the request's log records whose request this was. A no-op without wire_logging."""
+    log_context(
+        company_id=scope.company_id,
+        branch_code=scope.branch_code,
+        company_code=scope.company_code,
+        domain=scope.domain,
+    )
+
+
 async def _resolve_entitlement_scope(
     request: Request,
     claims: ApiClientClaims,
@@ -463,7 +474,7 @@ async def _resolve_entitlement_scope(
     if not domain:
         _fail(403, "domain_missing", "Could not resolve infrastructure domain from token/session")
 
-    return _ResolvedEntitlementScope(
+    resolved = _ResolvedEntitlementScope(
         client_id=claims.client_id,
         company_id=company_id,
         company_code=company_code,
@@ -471,6 +482,8 @@ async def _resolve_entitlement_scope(
         branch_code=header_branch_code if header_branch_code is not None else claims.branch_code,
         session=session,
     )
+    _note_log_scope(resolved)
+    return resolved
 
 
 async def _resolve_header_entitlement_scope(request: Request) -> _ResolvedEntitlementScope:
@@ -489,7 +502,7 @@ async def _resolve_header_entitlement_scope(request: Request) -> _ResolvedEntitl
     if header_company_code is None:
         _fail(403, "company_code_missing", "Could not resolve company_code from header")
 
-    return _ResolvedEntitlementScope(
+    resolved = _ResolvedEntitlementScope(
         client_id=None,
         company_id=header_company_id,
         company_code=header_company_code,
@@ -497,6 +510,8 @@ async def _resolve_header_entitlement_scope(request: Request) -> _ResolvedEntitl
         branch_code=header_branch_code,
         session=None,
     )
+    _note_log_scope(resolved)
+    return resolved
 
 
 def _parse_iso_datetime(value: Any) -> datetime | None:
