@@ -11,7 +11,8 @@ Environment:
 
     ADMIN_PANEL_AGENT_KEY   this server's agent key, issued by the panel (required)
     DJANGO_API_URL          the panel (default: the CloudOn panel)
-    REDIS_HOST/PORT/DB/PASSWORD   the server's Admin Panel Redis
+    CLOUDON_REDIS_HOST/PORT/DB/PASSWORD   the server's Admin Panel Redis
+                            (REDIS_* when none of those is set)
 
 How it behaves when things go wrong:
 
@@ -46,6 +47,7 @@ from typing import Any
 import httpx
 import redis
 
+from cloudon_admin_integration.config import redis_env
 from cloudon_admin_integration.logs import DEFAULT_LOG_STREAM
 
 logger = logging.getLogger("cloudon_admin_integration.agent")
@@ -101,13 +103,14 @@ class AgentSettings:
         if not agent_key:
             raise SystemExit("ADMIN_PANEL_AGENT_KEY is not set; issue one for this server from the panel.")
         stream = _env("CLOUDON_LOG_STREAM", DEFAULT_LOG_STREAM)
+        redis_cfg = redis_env()
         return cls(
             panel_url=(_env("DJANGO_API_URL", DEFAULT_ADMIN_PANEL_URL) or "").rstrip("/"),
             agent_key=agent_key,
-            redis_host=_env("REDIS_HOST", "localhost"),
-            redis_port=int(_env("REDIS_PORT", "6379")),
-            redis_db=int(_env("REDIS_DB", "0")),
-            redis_password=_env("REDIS_PASSWORD"),
+            redis_host=redis_cfg["HOST"] or "localhost",
+            redis_port=int(redis_cfg["PORT"] or 6379),
+            redis_db=int(redis_cfg["DB"] or 0),
+            redis_password=redis_cfg["PASSWORD"],
             stream=stream,
             dead_stream=f"{stream}:dead",
             consumer=_env("AGENT_CONSUMER_NAME", socket.gethostname()),

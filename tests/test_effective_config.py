@@ -461,6 +461,35 @@ class ModuleParameterDependencyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entitlement.branch_code, 101)
 
 
+class RedisEnvTests(unittest.TestCase):
+    """CLOUDON_REDIS_* names the panel's Redis apart from the project's own."""
+
+    def test_cloudon_names_win_and_are_read_alone(self):
+        env = {
+            "CLOUDON_REDIS_HOST": "pharmacyone_redis",
+            "REDIS_HOST": "redis",
+            "REDIS_PORT": "6390",
+            "REDIS_PASSWORD": "the-projects-own",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            settings = IntegrationSettings.from_env()
+
+        self.assertEqual(
+            (settings.redis_host, settings.redis_port, settings.redis_db, settings.redis_password),
+            ("pharmacyone_redis", 6379, 0, None),
+        )
+
+    def test_the_old_names_still_work(self):
+        env = {"REDIS_HOST": "redis", "REDIS_PORT": "6390", "REDIS_DB": "2", "REDIS_PASSWORD": "pw"}
+        with patch.dict("os.environ", env, clear=True):
+            settings = IntegrationSettings.from_env()
+
+        self.assertEqual(
+            (settings.redis_host, settings.redis_port, settings.redis_db, settings.redis_password),
+            ("redis", 6390, 2, "pw"),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
 

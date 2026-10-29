@@ -37,6 +37,25 @@ def _dedupe(values: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(value for value in values if value))
 
 
+REDIS_ENV_NAMES = ("HOST", "PORT", "DB", "PASSWORD")
+
+
+def redis_env() -> dict[str, str | None]:
+    """The Admin Panel Redis's HOST, PORT, DB and PASSWORD, from the environment.
+
+    CLOUDON_REDIS_* names it apart from any Redis the project itself uses. When
+    any of them is set they are read alone, so a project's own REDIS_PASSWORD
+    never ends up on the panel's connection; otherwise the REDIS_* names this
+    package started with still work.
+    """
+    prefix = (
+        "CLOUDON_REDIS_"
+        if any((os.getenv(f"CLOUDON_REDIS_{name}") or "").strip() for name in REDIS_ENV_NAMES)
+        else "REDIS_"
+    )
+    return {name: (os.getenv(prefix + name) or "").strip() or None for name in REDIS_ENV_NAMES}
+
+
 def _normalize_prefix(value: str | None) -> str | None:
     """Trim a Redis namespace to its bare form.
 
@@ -99,6 +118,7 @@ class IntegrationSettings:
     @classmethod
     def from_env(cls) -> "IntegrationSettings":
         base_url = (os.getenv("DJANGO_API_URL") or "").strip().rstrip("/")
+        redis_cfg = redis_env()
         raw_module_code = (os.getenv("APP_MODULE_CODE") or "").strip() or None
         # APP_MODULE_CODES is an allow-list, not a subscription: the panel pushes
         # every module a company holds into one cache, and a service reads what
@@ -140,10 +160,10 @@ class IntegrationSettings:
                 or (os.getenv("SYNC_KEY") or "").strip()
                 or None
             ),
-            redis_host=(os.getenv("REDIS_HOST") or "localhost").strip(),
-            redis_port=int(os.getenv("REDIS_PORT") or 6379),
-            redis_db=int(os.getenv("REDIS_DB") or 0),
-            redis_password=(os.getenv("REDIS_PASSWORD") or "").strip() or None,
+            redis_host=redis_cfg["HOST"] or "localhost",
+            redis_port=int(redis_cfg["PORT"] or 6379),
+            redis_db=int(redis_cfg["DB"] or 0),
+            redis_password=redis_cfg["PASSWORD"],
             redis_key_prefix=_normalize_prefix(os.getenv("REDIS_KEY_PREFIX")) or DEFAULT_REDIS_KEY_PREFIX,
             redis_key_prefix_fallbacks=_fallback_prefixes(
                 os.getenv("REDIS_KEY_PREFIX_FALLBACKS"),
