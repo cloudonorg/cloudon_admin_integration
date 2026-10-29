@@ -56,12 +56,22 @@ DJANGO_API_URL="https://devadminpanel2.cloudon.gr"
 # this cache current, and the bootstrap that refills it after a stop or rebuild.
 ADMIN_PANEL_SYNC_KEY="change_me"
 
-# Redis holding the panel's data on this server.
-REDIS_HOST="redis"
-REDIS_PORT="6379"
-REDIS_DB="0"
-REDIS_PASSWORD=""
+# Redis holding the panel's data on this server. The CLOUDON_ prefix keeps it
+# apart from any Redis the project uses for itself.
+CLOUDON_REDIS_HOST="redis"
+CLOUDON_REDIS_PORT="6379"
+CLOUDON_REDIS_DB="0"
+CLOUDON_REDIS_PASSWORD=""
 ```
+
+When none of `CLOUDON_REDIS_*` is set the package reads `REDIS_HOST` /
+`REDIS_PORT` / `REDIS_DB` / `REDIS_PASSWORD`, the names it started with. When
+any of them is set, only those are read — so a project's own `REDIS_PASSWORD`
+is never sent to the panel's Redis.
+
+The panel can write these lines for you: on the server's **Admin Panel kit**
+tab, **Connect a project** picks the project's folder on the server and adds
+them, with the project's and container's ids, to its `.env.admin-panel`.
 
 Everything below is optional, and most services set none of it.
 
@@ -111,7 +121,7 @@ Module notes:
   whether or not this service lists them.
 
 Security notes:
-- inside Docker, `localhost` is the API container itself; use `REDIS_HOST=redis` when the Redis service is named `redis`
+- inside Docker, `localhost` is the API container itself; use `CLOUDON_REDIS_HOST=redis` when the Redis service is named `redis`
 - `ADMIN_PANEL_SYNC_KEY` must match the admin backend `SYNC_KEY` exactly so webhook cache refresh requests are accepted
 - `SYNC_KEY` is still supported as a fallback for older integrations, but new APIs should use `ADMIN_PANEL_SYNC_KEY` in `.env.admin-panel`
 
@@ -496,8 +506,9 @@ CLOUDON_DOCKER_ID="12"
 CLOUDON_SERVICE="orders-api"
 ```
 
-The service writes to the Redis named by `REDIS_HOST` / `REDIS_PORT` /
-`REDIS_PASSWORD` — the same one it reads licences and parameters from.
+The service writes to the Redis named by `CLOUDON_REDIS_HOST` /
+`CLOUDON_REDIS_PORT` / `CLOUDON_REDIS_PASSWORD` — the same one it reads
+licences and parameters from.
 
 ### The Admin Panel kit on each server
 
@@ -522,9 +533,9 @@ settings in `/opt/admin_panel_kit/agent.env` (readable by root only):
 
 ```env
 ADMIN_PANEL_AGENT_KEY="..."   # issued by the panel for this server on install
-REDIS_HOST="redis_admin_panel"
-REDIS_PORT="6379"
-REDIS_PASSWORD="..."
+CLOUDON_REDIS_HOST="redis_admin_panel"
+CLOUDON_REDIS_PORT="6379"
+CLOUDON_REDIS_PASSWORD="..."
 DJANGO_API_URL="https://devadminpanel2.cloudon.gr"
 ```
 
@@ -708,7 +719,7 @@ git+https://github.com/cloudonorg/cloudon_admin_integration.git
 
 ### Startup fails connecting to Redis localhost
 
-Set `REDIS_HOST=redis` when Redis is a Docker Compose service named `redis`.
+Set `CLOUDON_REDIS_HOST=redis` when Redis is a Docker Compose service named `redis`.
 
 ### `Token invalid`
 

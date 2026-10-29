@@ -142,5 +142,20 @@ class AgentTests(unittest.TestCase):
         self.assertLess(len(big), agent_module.MAX_BATCH_BYTES)
 
 
+class AgentSettingsTests(unittest.TestCase):
+    def test_reads_the_cloudon_redis_names(self):
+        from unittest.mock import patch
+
+        env = {
+            "ADMIN_PANEL_AGENT_KEY": "k",
+            "CLOUDON_REDIS_HOST": "redis_admin_panel",
+            "CLOUDON_REDIS_PASSWORD": "pw",
+            "REDIS_HOST": "redis",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            cfg = AgentSettings.from_env()
+        self.assertEqual((cfg.redis_host, cfg.redis_port, cfg.redis_password), ("redis_admin_panel", 6379, "pw"))
+
+
 if __name__ == "__main__":
     unittest.main()

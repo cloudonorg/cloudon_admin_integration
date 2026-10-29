@@ -158,8 +158,8 @@ class IntegrationCache:
             self.redis = None
             raise RuntimeError(
                 "Redis unavailable at "
-                f"REDIS_HOST={self.cfg.redis_host!r} REDIS_PORT={self.cfg.redis_port}. "
-                "When the API runs in Docker, REDIS_HOST must be the Redis service/container "
+                f"CLOUDON_REDIS_HOST={self.cfg.redis_host!r} CLOUDON_REDIS_PORT={self.cfg.redis_port}. "
+                "When the API runs in Docker, CLOUDON_REDIS_HOST must be the Redis service/container "
                 "name on the same Docker network, such as 'redis' or 'pharmacyone_redis', "
                 "not 'localhost'."
             ) from exc
