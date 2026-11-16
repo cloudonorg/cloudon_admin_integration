@@ -175,5 +175,64 @@ class StreamWriteTests(unittest.TestCase):
         self.assertFalse(asyncio.run(go()))
 
 
+
+def _capturing_app():
+    app = FastAPI()
+
+    @app.post("/orders")
+    async def create(body: dict):
+        log_context(retryable=True, suggested_action="Set the order series.")
+        raise HTTPException(status_code=500, detail="no series")
+
+    @app.post("/quiet")
+    async def quiet(body: dict):
+        raise HTTPException(status_code=500)
+
+    wire_logging(app, capture_requests=True)
+    return app
+
+
+class RequestCaptureTests(unittest.TestCase):
+    """What a record keeps so the panel can send the request again."""
+
+    def setUp(self):
+        self.records = []
+        self.patch = patch.object(logs._writer, "write_later", self.records.append)
+        self.patch.start()
+
+    def tearDown(self):
+        self.patch.stop()
+
+    def test_nothing_of_the_request_is_kept_unless_asked(self):
+        client = TestClient(_app(), raise_server_exceptions=False)
+        client.get("/crash?token=abc")
+        [record] = self.records
+        self.assertNotIn("request", record)
+        self.assertNotIn("query", record)
+
+    def test_body_and_query_are_kept_with_credentials_replaced(self):
+        client = TestClient(_capturing_app(), raise_server_exceptions=False)
+        client.post("/orders?dry=0&api_key=k1", json={"order": "W-1", "auth": {"password": "pw"}})
+        [record] = self.records
+        self.assertEqual(record["request"], {"order": "W-1", "auth": {"password": logs.REDACTED}})
+        self.assertEqual(record["query"], f"dry=0&api_key={logs.REDACTED}")
+        self.assertNotIn("pw", json.dumps(record))
+        self.assertNotIn("k1", json.dumps(record))
+
+    def test_the_request_says_it_is_retryable_and_what_to_do(self):
+        client = TestClient(_capturing_app(), raise_server_exceptions=False)
+        client.post("/orders", json={"order": "W-1"})
+        [record] = self.records
+        self.assertIs(record["retryable"], True)
+        self.assertEqual(record["suggested_action"], "Set the order series.")
+        self.assertNotIn("extra", record)
+
+    def test_a_body_past_the_limit_is_left_out_whole(self):
+        client = TestClient(_capturing_app(), raise_server_exceptions=False)
+        client.post("/quiet", json={"blob": "x" * (logs.REQUEST_BODY_LIMIT + 1)})
+        [record] = self.records
+        self.assertNotIn("request", record)
+        self.assertNotIn("retryable", record)
+
 if __name__ == "__main__":
     unittest.main()
