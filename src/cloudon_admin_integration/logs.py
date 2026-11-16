@@ -10,6 +10,17 @@ log rather than failing the request.
 Only what went wrong is logged. A request is recorded when it answers 4xx or
 5xx, or raises; the code can add its own records with `emit_log`.
 
+A record can say two things about itself that the panel shows on its list:
+whether a person should act on it, and whether sending the request again makes
+sense. `log_context(retryable=True)` or `log_context(suggested_action="...")`
+sets them for the current request. Left unsaid, the panel treats a request that
+failed on the service's side (an exception or a 5xx) as retryable.
+
+The panel can only send a request again if the record kept it. That is asked
+for: `wire_logging(app, capture_requests=True)` keeps the query string and a
+JSON body of up to REQUEST_BODY_LIMIT bytes with each failed request, with
+anything that looks like a credential replaced before it leaves the service.
+
     from cloudon_admin_integration import wire_logging, log_step, emit_log
 
     wire_logging(app)
@@ -64,6 +75,33 @@ WRITE_TIMEOUT_SECONDS = 0.25
 #: How much of a failed response's body is kept with its record.
 RESPONSE_BODY_LIMIT = 4096
 TRACEBACK_LIMIT = 8000
+#: How much of a failed request's body is kept, when capturing is switched on.
+REQUEST_BODY_LIMIT = 16384
+REDACTED = "***redacted***"
+_SENSITIVE = ("password", "secret", "token", "authorization", "api_key", "apikey", "client_secret")
+
+
+def _is_sensitive(name: Any) -> bool:
+    lowered = str(name).lower()
+    return any(part in lowered for part in _SENSITIVE)
+
+
+def redact(value: Any) -> Any:
+    """A copy with every credential-looking key's value replaced, at any depth."""
+    if isinstance(value, dict):
+        return {key: (REDACTED if _is_sensitive(key) else redact(item)) for key, item in value.items()}
+    if isinstance(value, list):
+        return [redact(item) for item in value]
+    return value
+
+
+def redact_query(raw: str) -> str:
+    """A query string with credential-looking parameters' values replaced."""
+    parts = []
+    for pair in raw.split("&"):
+        name, sep, _ = pair.partition("=")
+        parts.append(f"{name}={REDACTED}" if sep and _is_sensitive(name) else pair)
+    return "&".join(parts)
 
 #: The levels the panel files records under.
 LEVELS = ("ERROR", "BUG", "WARNING", "INFO", "SECURITY", "PERFORMANCE", "AUDIT")
@@ -210,7 +248,10 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-_RECORD_CONTEXT_KEYS = ("company_id", "branch_code", "module", "request_id", "step", "process")
+_RECORD_CONTEXT_KEYS = (
+    "company_id", "branch_code", "module", "request_id", "step", "process",
+    "retryable", "actionable", "suggested_action",
+)
 
 
 def _base_record(kind: str, context: dict[str, Any] | None) -> dict[str, Any]:
@@ -235,6 +276,11 @@ def _base_record(kind: str, context: dict[str, Any] | None) -> dict[str, Any]:
         record["company_id"] = str(record["company_id"])
     if "branch_code" in record:
         record["branch_code"] = _int_or_none(record["branch_code"])
+    for flag in ("retryable", "actionable"):
+        if flag in record:
+            record[flag] = bool(record[flag])
+    if "suggested_action" in record:
+        record["suggested_action"] = str(record["suggested_action"])
     if extra:
         record["extra"] = extra
     return record
@@ -255,6 +301,8 @@ async def emit_log(
     process: str | None = None,
     error: BaseException | None = None,
     extra: dict[str, Any] | None = None,
+    actionable: bool | None = None,
+    suggested_action: str | None = None,
     wait: bool = False,
 ) -> None:
     """Record something the service's own code noticed.
@@ -279,6 +327,10 @@ async def emit_log(
         record["process"] = process
     if error is not None:
         record["error"] = _error_of(error)
+    if actionable is not None:
+        record["actionable"] = bool(actionable)
+    if suggested_action:
+        record["suggested_action"] = str(suggested_action)
     if extra:
         record["extra"] = {**record.get("extra", {}), **extra}
     if wait:
@@ -331,8 +383,10 @@ class LoggingMiddleware:
         *,
         excluded_paths: Iterable[str] = (),
         skip_statuses: Iterable[int] = (),
+        capture_requests: bool = False,
     ) -> None:
         self.app = app
+        self.capture_requests = bool(capture_requests)
         self.excluded_paths = tuple(excluded_paths)
         self.skip_statuses = frozenset(skip_statuses)
         self.routes = _RouteTemplates()
@@ -373,9 +427,26 @@ class LoggingMiddleware:
                     body.extend(message.get("body", b"")[: RESPONSE_BODY_LIMIT - len(body)])
             await send(message)
 
+        # The request's own body, kept only when asked for and only up to the
+        # limit: the endpoint still reads every byte, this just looks on.
+        sent = bytearray()
+        too_long = False
+
+        async def receive_wrapper():
+            nonlocal too_long
+            message = await receive()
+            if message.get("type") == "http.request" and not too_long:
+                chunk = message.get("body", b"")
+                if len(sent) + len(chunk) > REQUEST_BODY_LIMIT:
+                    too_long = True
+                    sent.clear()
+                else:
+                    sent.extend(chunk)
+            return message
+
         error: BaseException | None = None
         try:
-            await self.app(scope, receive, send_wrapper)
+            await self.app(scope, receive_wrapper if self.capture_requests else receive, send_wrapper)
         except Exception as exc:
             error = exc
             raise
@@ -384,9 +455,23 @@ class LoggingMiddleware:
             if error is not None or (status is not None and status >= 400 and status not in self.skip_statuses):
                 try:
                     record = self._record(scope, context, status, started, bytes(body), error)
+                    if self.capture_requests:
+                        self._add_request(record, scope, bytes(sent))
                     _writer.write_later(record)
                 except Exception:  # never let the log break the request
                     logger.debug("Could not build a log record", exc_info=True)
+
+    @staticmethod
+    def _add_request(record: dict[str, Any], scope, sent: bytes) -> None:
+        """The query string and JSON body the panel needs to send the request again."""
+        query = (scope.get("query_string") or b"").decode("latin-1")
+        if query:
+            record["query"] = redact_query(query)
+        if sent:
+            try:
+                record["request"] = redact(json.loads(sent.decode("utf-8")))
+            except ValueError:
+                pass  # not JSON: nothing the panel could faithfully resend
 
     def _record(self, scope, context, status, started, body, error) -> dict[str, Any]:
         record = _base_record("request", context)
@@ -416,6 +501,7 @@ def wire_logging(
     *,
     excluded_paths: Iterable[str] | None = None,
     skip_statuses: Iterable[int] = (),
+    capture_requests: bool = False,
 ) -> None:
     """Send the app's failed requests to the Admin Panel.
 
@@ -424,11 +510,16 @@ def wire_logging(
     wraps everything else and sees exceptions before they become 500s.
     `skip_statuses` leaves out statuses that are routine for this service
     (say 404 on an API scanners like to probe).
+
+    `capture_requests` keeps each failed request's query string and JSON body
+    with its record, credentials replaced, so the panel can send it again. Off
+    unless asked for: it is the caller's data leaving the service.
     """
     app.add_middleware(
         LoggingMiddleware,
         excluded_paths=tuple(excluded_paths if excluded_paths is not None else settings.integration_excluded_paths),
         skip_statuses=tuple(skip_statuses),
+        capture_requests=capture_requests,
     )
 
     @app.on_event("shutdown")
