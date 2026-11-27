@@ -65,8 +65,51 @@ WRITE_TIMEOUT_SECONDS = 0.25
 RESPONSE_BODY_LIMIT = 4096
 TRACEBACK_LIMIT = 8000
 
-#: The levels the panel files records under.
-LEVELS = ("ERROR", "BUG", "WARNING", "INFO", "SECURITY", "PERFORMANCE", "AUDIT")
+#: One list of levels with the Admin Panel (its system_logs/levels.py): the
+#: panel's seven and the package's BUG, PERFORMANCE and AUDIT. A level is what
+#: kind of record it is (the panel's "Type"); how urgent it is, is `severity`.
+LEVELS = (
+    "DEBUG",
+    "INFO",
+    "SUCCESS",
+    "WARNING",
+    "ERROR",
+    "SECURITY",
+    "BUSINESS",
+    "BUG",
+    "PERFORMANCE",
+    "AUDIT",
+)
+
+#: Spellings from other loggers, and the level each is sent as.
+ALIASES = {
+    "WARN": "WARNING",
+    "CRITICAL": "ERROR",
+    "FATAL": "ERROR",
+    "EMERGENCY": "ERROR",
+    "ALERT": "ERROR",
+    "EXCEPTION": "ERROR",
+    "NOTICE": "INFO",
+    "TRACE": "DEBUG",
+    "OK": "SUCCESS",
+}
+
+#: Aliases that also say how urgent: sent as the severity when none was given.
+_ALIAS_SEVERITY = {name: "CRITICAL" for name in ("CRITICAL", "FATAL", "EMERGENCY", "ALERT", "EXCEPTION")}
+
+
+def normalize_level(level: str | None) -> tuple[str, str | None]:
+    """The level to send, and the severity an alias implies (or None).
+
+    Trimmed and read in any case. A level that is neither in LEVELS nor an
+    alias is sent as INFO: a mislabelled record is better than a lost one.
+    """
+    text = str(level or "").strip().upper()
+    if text in LEVELS:
+        return text, None
+    if text in ALIASES:
+        return ALIASES[text], _ALIAS_SEVERITY.get(text)
+    return "INFO", None
 
 
 def _env(name: str) -> str | None:
@@ -259,13 +302,15 @@ async def emit_log(
 ) -> None:
     """Record something the service's own code noticed.
 
-    `level` is one of LEVELS. The record carries the current request's id,
+    `level` is one of LEVELS or ALIASES; anything else is sent as INFO.
+    `severity` is LOW, MEDIUM, HIGH or CRITICAL; left out, the panel derives
+    it from the level (CRITICAL and FATAL imply CRITICAL). The record carries
+    the current request's id,
     company and step when there is one. It is written in the background unless
     `wait` is set, and is lost — quietly — if Redis cannot take it.
     """
-    level = (level or "INFO").upper()
-    if level not in LEVELS:
-        level = "INFO"
+    level, alias_severity = normalize_level(level)
+    severity = severity or alias_severity
     record = _base_record("event", _request_context.get())
     record["level"] = level
     record["title"] = str(title)[:255]
