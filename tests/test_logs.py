@@ -175,5 +175,47 @@ class StreamWriteTests(unittest.TestCase):
         self.assertFalse(asyncio.run(go()))
 
 
+class LevelTests(unittest.TestCase):
+    """The same levels as the Admin Panel, with the same aliases."""
+
+    def test_the_list_is_the_panels(self):
+        self.assertEqual(
+            set(logs.LEVELS),
+            {"DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "SECURITY", "BUSINESS", "BUG", "PERFORMANCE", "AUDIT"},
+        )
+
+    def test_normalize(self):
+        cases = {
+            "performance": ("PERFORMANCE", None),
+            " Debug ": ("DEBUG", None),
+            "warn": ("WARNING", None),
+            "CRITICAL": ("ERROR", "CRITICAL"),
+            "fatal": ("ERROR", "CRITICAL"),
+            "notice": ("INFO", None),
+            "trace": ("DEBUG", None),
+            "ok": ("SUCCESS", None),
+            "verbose": ("INFO", None),
+            None: ("INFO", None),
+        }
+        for given, expected in cases.items():
+            self.assertEqual(logs.normalize_level(given), expected, given)
+
+    def _emit(self, *args, **kwargs):
+        records = []
+        with patch.object(logs._writer, "write_later", records.append):
+            asyncio.run(emit_log(*args, **kwargs))
+        [record] = records
+        return record
+
+    def test_emit_log_sends_the_canonical_level(self):
+        record = self._emit("warn", "ERP slow")
+        self.assertEqual(record["level"], "WARNING")
+        self.assertNotIn("severity", record)
+
+    def test_an_alias_brings_its_severity_unless_one_is_given(self):
+        self.assertEqual((self._emit("critical", "down")["level"], self._emit("critical", "down")["severity"]), ("ERROR", "CRITICAL"))
+        self.assertEqual(self._emit("critical", "down", severity="low")["severity"], "LOW")
+
+
 if __name__ == "__main__":
     unittest.main()

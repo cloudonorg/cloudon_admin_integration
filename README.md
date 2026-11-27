@@ -480,6 +480,15 @@ async def create_order(order_id: int):
     await emit_log("WARNING", "ERP answered slowly", "took 9 s")
 ```
 
+`emit_log`'s level is one of `LEVELS`, the same list the Admin Panel files
+records under: DEBUG, INFO, SUCCESS, WARNING, ERROR, SECURITY, BUSINESS, BUG,
+PERFORMANCE and AUDIT. The level says what kind of record it is (the panel's
+"Type"); `severity` (LOW, MEDIUM, HIGH, CRITICAL) says how urgent it is.
+Common spellings from other loggers are accepted: WARN is WARNING; CRITICAL,
+FATAL, EMERGENCY, ALERT and EXCEPTION are ERROR with severity CRITICAL unless
+one is given; NOTICE is INFO, TRACE is DEBUG and OK is SUCCESS. Anything else
+is sent as INFO. `normalize_level()` gives the same answer for your own code.
+
 Logging is opt-in: a service rebuilt onto a newer package does not start
 logging until it calls `wire_logging`. `wire_logging(app, skip_statuses=[404])`
 leaves out statuses that are routine for the service.

@@ -19,7 +19,7 @@ from cloudon_admin_integration.dependencies import (
     startup_integration,
     validate_license,
 )
-from cloudon_admin_integration.logs import emit_log, log_context, log_step, wire_logging
+from cloudon_admin_integration.logs import LEVELS, emit_log, log_context, log_step, normalize_level, wire_logging
 from cloudon_admin_integration.plugplay import entitlement_dependency, entitlements_dependency, wire_integration
 from cloudon_admin_integration.responses import wire_response_envelope
 from cloudon_admin_integration.security import require_valid_api_client_token
@@ -27,6 +27,8 @@ from cloudon_admin_integration.sync_routes import apply_api_client_payload
 from cloudon_admin_integration.sync_routes import sync_router
 
 __all__ = [
+    "LEVELS",
+    "normalize_level",
     "EntitlementContext",
     "EntitlementLicenseContext",
     "EntitlementsContext",
